@@ -27,20 +27,22 @@ jobs:
       - uses: astral-sh/setup-uv@v5
         with:
           enable-cache: true
-
-      - name: Set up Python
-        run: uv python install ${{ matrix.python }}
+          python-version: ${{ matrix.python }}
 
       - name: Install
-        run: uv pip install --system ".[dev]"
+        # Into a venv, not --system: runner system interpreters are externally managed,
+        # and --system would silently ignore the matrix Python entirely.
+        run: |
+          uv venv
+          uv pip install ".[dev]"
 
       - name: Lint
-        run: ruff check .
+        run: uv run ruff check .
 
       - name: Test
         # The suite is hermetic: a stub rclone stands in for the real binary, so no
         # network access and no credentials are involved.
-        run: pytest -q
+        run: uv run pytest -q
 
   build:
     name: build wheel
