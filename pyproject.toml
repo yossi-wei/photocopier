@@ -1,0 +1,47 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "photocopier"
+version = "0.1.0"
+description = "Move phone camera uploads from OneDrive into a NAS photo library"
+readme = "README.md"
+license = { file = "LICENSE" }
+requires-python = ">=3.11"
+authors = [{ name = "Yossi Weihs" }]
+keywords = ["onedrive", "nas", "photos", "rclone", "backup"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Environment :: Console",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: System :: Archiving :: Backup",
+]
+# No runtime dependencies: tomllib and sqlite3 are stdlib, and rclone is an external
+# binary rather than a Python package.
+dependencies = []
+
+[project.optional-dependencies]
+dev = ["pytest>=8.0", "ruff>=0.6"]
+
+[project.scripts]
+photocopier = "photocopier.cli:main"
+
+[project.urls]
+Homepage = "https://github.com/yossi-wei/photocopier"
+
+[tool.hatch.build.targets.wheel]
+packages = ["photocopier"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra --strict-markers"
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM"]

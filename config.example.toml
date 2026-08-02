@@ -1,0 +1,50 @@
+# photocopier configuration — copy to config.toml and edit.
+#
+# config.toml is gitignored. Nothing machine-specific belongs in this example file.
+
+[spool]
+# Durable staging area. Never a temp directory: macOS purges /tmp after ~3 days idle
+# and clears $TMPDIR on boot, which would destroy the backlog mid-travel. See D7.
+# $PHOTOCOPIER_SPOOL overrides this.
+path   = "~/.local/share/photocopier/spool"
+
+# Hard ceiling. When reached, ingest stops and warns. Nothing is ever deleted to make
+# room. At ~2 GB/month this is roughly ten months of travel headroom.
+cap_gb = 20
+
+[destination]
+photos_root = "/Volumes/media/photos"   # filed as YYYY/MM/
+video_root  = "/Volumes/media/video"    # filed as YYYY/ — yearly only, no month folders
+mount_point = "/Volumes/media"
+
+# A file that must exist on the share. Guards against the worst failure mode in the
+# system: an unmounted share leaves an empty local directory behind, so a naive delivery
+# writes the whole backlog to the boot disk and reports success.
+#   touch /Volumes/media/.photocopier-marker
+mount_marker = ".photocopier-marker"
+
+[rclone]
+# Name of the rclone remote pointing at OneDrive. Create it with `rclone config`.
+# Credentials live in rclone's own config and are never read or stored by photocopier.
+remote    = "onedrive"
+transfers = 4
+bwlimit   = ""          # e.g. "2M" to be polite on hotel wifi
+
+# One block per phone. Adding a phone is a config change, not a code change.
+[[source]]
+id     = "phone-1"                 # stable identifier, used in the ledger
+path   = "Camera Roll"           # folder within the remote
+suffix = "phone-1"                 # appended to filenames: PXL_20260601_112702768_yossi.jpg
+cutoff = "2026-01-01"            # material before this date was filed manually
+
+[[source]]
+id     = "phone-2"
+path   = "Pictures/Camera Roll"
+suffix = "phone-2"
+cutoff = "2026-01-01"
+
+[classify]
+# Photos go to photos_root/YYYY/MM, videos to video_root/YYYY. Anything unrecognised is
+# routed to triage rather than guessed at.
+photo_exts = ["jpg", "jpeg", "heic", "heif", "png", "dng", "gif", "tif", "tiff", "webp"]
+video_exts = ["mp4", "mov", "m4v", "avi", "mkv", "3gp"]
