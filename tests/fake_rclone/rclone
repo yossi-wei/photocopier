@@ -1,0 +1,159 @@
+#!/usr/bin/env python3
+"""A stand-in for the rclone binary, so tests exercise the real code paths offline.
+
+Serves a directory tree named by $FAKE_RCLONE_ROOT as if it were a remote. Implements
+only the subcommands photocopier uses: version, listremotes, lsjson, copy.
+
+$FAKE_RCLONE_FAIL_ON, if set, makes `copy` fail after transferring files whose relative
+path sorts before it — used to test partial-transfer recovery.
+"""
+
+from __future__ import annotations
+
+import hashlib
+import json
+import os
+import shutil
+import sys
+from datetime import datetime, timezone
+from pathlib import Path
+
+REMOTE_NAME = "onedrive"
+
+
+def root() -> Path:
+    value = os.environ.get("FAKE_RCLONE_ROOT")
+    if not value:
+        sys.stderr.write("FAKE_RCLONE_ROOT is not set\n")
+        raise SystemExit(2)
+    return Path(value)
+
+
+def split_remote(arg: str) -> tuple[str, str]:
+    remote, _, path = arg.partition(":")
+    return remote, path.strip("/")
+
+
+def positional(argv: list[str]) -> list[str]:
+    """Drop flags and their values; return bare positional arguments."""
+    takes_value = {"--files-from-raw", "--transfers", "--bwlimit", "--config"}
+    out: list[str] = []
+    index = 0
+    while index < len(argv):
+        token = argv[index]
+        if token in takes_value:
+            index += 2
+            continue
+        if token.startswith("-"):
+            index += 1
+            continue
+        out.append(token)
+        index += 1
+    return out
+
+
+def flag_value(argv: list[str], name: str) -> str | None:
+    if name in argv:
+        position = argv.index(name)
+        if position + 1 < len(argv):
+            return argv[position + 1]
+    return None
+
+
+def cmd_version() -> int:
+    print("rclone v9.99.9-fake")
+    print("- os/version: test")
+    return 0
+
+
+def cmd_listremotes() -> int:
+    print(f"{REMOTE_NAME}:")
+    return 0
+
+
+def cmd_lsjson(argv: list[str]) -> int:
+    targets = [arg for arg in positional(argv) if ":" in arg]
+    if not targets:
+        sys.stderr.write("lsjson: no remote:path given\n")
+        return 2
+    _, path = split_remote(targets[0])
+    base = root() / path
+
+    entries = []
+    if base.exists():
+        for item in sorted(base.rglob("*")):
+            relative = item.relative_to(base)
+            is_dir = item.is_dir()
+            stat = item.stat()
+            entry = {
+                "Path": str(relative),
+                "Name": item.name,
+                "Size": -1 if is_dir else stat.st_size,
+                "ModTime": datetime.fromtimestamp(stat.st_mtime, tz=timezone.utc)
+                .isoformat()
+                .replace("+00:00", "Z"),
+                "IsDir": is_dir,
+            }
+            if not is_dir:
+                digest = hashlib.md5(item.read_bytes()).hexdigest()  # noqa: S324 - test fixture
+                entry["Hashes"] = {"QuickXorHash": digest}
+            entries.append(entry)
+
+    print(json.dumps(entries))
+    return 0
+
+
+def cmd_copy(argv: list[str]) -> int:
+    args = positional(argv)
+    if len(args) < 2:
+        sys.stderr.write("copy: need source and destination\n")
+        return 2
+
+    _, source_path = split_remote(args[0])
+    source_base = root() / source_path
+    dest_base = Path(args[1])
+
+    list_file = flag_value(argv, "--files-from-raw")
+    if list_file:
+        relatives = [
+            line for line in Path(list_file).read_text(encoding="utf-8").splitlines() if line
+        ]
+    else:
+        relatives = [
+            str(p.relative_to(source_base)) for p in sorted(source_base.rglob("*")) if p.is_file()
+        ]
+
+    fail_on = os.environ.get("FAKE_RCLONE_FAIL_ON")
+    for relative in relatives:
+        if fail_on and relative == fail_on:
+            sys.stderr.write(f"copy: simulated failure on {relative}\n")
+            return 1
+        source = source_base / relative
+        if not source.is_file():
+            sys.stderr.write(f"copy: no such file {relative}\n")
+            return 1
+        target = dest_base / relative
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(source, target)
+    return 0
+
+
+def main() -> int:
+    if len(sys.argv) < 2:
+        sys.stderr.write("usage: rclone <command> [args]\n")
+        return 2
+    command, rest = sys.argv[1], sys.argv[2:]
+    if command == "version":
+        return cmd_version()
+    if command == "listremotes":
+        return cmd_listremotes()
+    if command == "lsjson":
+        return cmd_lsjson(rest)
+    if command == "copy":
+        return cmd_copy(rest)
+    sys.stderr.write(f"fake rclone: unsupported command {command!r}\n")
+    return 2
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
