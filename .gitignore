@@ -1,0 +1,28 @@
+# Real configuration is machine-specific and never committed.
+config.toml
+
+# Spool contents and the ledger live outside the repo by default, but guard against a
+# spool configured inside it.
+spool/
+*.db
+*.db-wal
+*.db-shm
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+*.egg-info/
+dist/
+build/
+.pytest_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# macOS
+.DS_Store
+
+# Local tool settings
+.claude/settings.local.json
