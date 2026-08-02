@@ -27,14 +27,15 @@ jobs:
       - uses: astral-sh/setup-uv@v5
         with:
           enable-cache: true
+          cache-dependency-glob: pyproject.toml
           python-version: ${{ matrix.python }}
 
       - name: Install
-        # Into a venv, not --system: runner system interpreters are externally managed,
-        # and --system would silently ignore the matrix Python entirely.
-        run: |
-          uv venv
-          uv pip install ".[dev]"
+        # setup-uv with python-version has already created and activated .venv, so this
+        # installs into the matrix interpreter. Do not add `uv venv` here — it errors if
+        # a venv already exists. Installing --system instead would target the runner's
+        # system Python, which is externally managed on Ubuntu and ignores the matrix.
+        run: uv pip install ".[dev]"
 
       - name: Lint
         run: uv run ruff check .
