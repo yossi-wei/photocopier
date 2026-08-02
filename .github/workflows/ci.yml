@@ -22,19 +22,23 @@ jobs:
         python: ["3.11", "3.12", "3.13"]
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
-      - uses: astral-sh/setup-uv@v5
+      - uses: astral-sh/setup-uv@v7
         with:
           enable-cache: true
           cache-dependency-glob: pyproject.toml
           python-version: ${{ matrix.python }}
+          # Required from v6 onwards. Until v5, python-version implicitly created and
+          # activated .venv at the repo root; that is now opt-in. Without this the
+          # Install step below would have nowhere to install to.
+          activate-environment: true
 
       - name: Install
-        # setup-uv with python-version has already created and activated .venv, so this
-        # installs into the matrix interpreter. Do not add `uv venv` here — it errors if
-        # a venv already exists. Installing --system instead would target the runner's
-        # system Python, which is externally managed on Ubuntu and ignores the matrix.
+        # setup-uv has created and activated .venv on the matrix interpreter, so this
+        # installs into it. Do not add `uv venv` here — it errors if a venv already
+        # exists. Installing --system instead would target the runner's system Python,
+        # which is externally managed on Ubuntu and ignores the matrix entirely.
         run: uv pip install ".[dev]"
 
       - name: Lint
@@ -49,8 +53,10 @@ jobs:
     name: build wheel
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: astral-sh/setup-uv@v5
+      - uses: actions/checkout@v5
+      # No activate-environment here: this job builds its own venv at /tmp/check to
+      # prove the wheel installs cleanly from scratch, the way someone cloning would.
+      - uses: astral-sh/setup-uv@v7
 
       - name: Build
         run: uv build
