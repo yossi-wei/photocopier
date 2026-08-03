@@ -11,6 +11,7 @@ from photocopier.rclone import Rclone
 from photocopier.spool import Spool
 
 FAKE_RCLONE = Path(__file__).parent / "fake_rclone" / "rclone"
+FIXTURES = Path(__file__).parent / "fixtures"
 
 
 @pytest.fixture(autouse=True)

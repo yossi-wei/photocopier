@@ -26,3 +26,6 @@ htmlcov/
 
 # Local tool settings
 .claude/settings.local.json
+
+# Resolved by uv on demand; not pinned for this project.
+uv.lock

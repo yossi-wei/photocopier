@@ -19,9 +19,10 @@ classifiers = [
     "Programming Language :: Python :: 3.12",
     "Topic :: System :: Archiving :: Backup",
 ]
-# No runtime dependencies: tomllib and sqlite3 are stdlib, and rclone is an external
-# binary rather than a Python package.
-dependencies = []
+# exifread is the only runtime dependency: pure Python, no C extensions and no build
+# step, so it installs anywhere the tool needs to run including a NAS jail (D9).
+# tomllib and sqlite3 are stdlib, and rclone is an external binary, not a package.
+dependencies = ["exifread>=3.0"]
 
 [project.optional-dependencies]
 dev = ["pytest>=8.0", "ruff>=0.6"]

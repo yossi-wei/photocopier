@@ -241,6 +241,80 @@ class Ledger:
                 ),
             )
 
+    def mark_processed(
+        self,
+        item_id: int,
+        *,
+        spool_path: Path,
+        dest_path: str,
+        resolved_date: str,
+        date_source: str,
+    ) -> None:
+        """Record a file that is confirmed present at its outbox location.
+
+        Called after the rename, never before — same ordering rule as ingest. If this
+        write is lost, the file is simply reprocessed, which is idempotent.
+        """
+        with self.transaction() as conn:
+            conn.execute(
+                """
+                UPDATE items SET
+                  state = ?, spool_path = ?, dest_path = ?,
+                  resolved_date = ?, date_source = ?, processed_at = ?,
+                  triage_reason = NULL, last_error = NULL
+                WHERE id = ?
+                """,
+                (
+                    State.PROCESSED.value, str(spool_path), dest_path,
+                    resolved_date, date_source, _now(), item_id,
+                ),
+            )
+
+    def mark_triaged(
+        self,
+        item_id: int,
+        *,
+        spool_path: Path,
+        reason: str,
+        date_source: str = "none",
+    ) -> None:
+        """Park an item for human review. Triaged items are never delivered."""
+        with self.transaction() as conn:
+            conn.execute(
+                """
+                UPDATE items SET
+                  state = ?, spool_path = ?, triage_reason = ?,
+                  date_source = ?, processed_at = ?, dest_path = NULL
+                WHERE id = ?
+                """,
+                (
+                    State.TRIAGED.value, str(spool_path), reason,
+                    date_source, _now(), item_id,
+                ),
+            )
+
+    def triage_reasons(self) -> dict[str, int]:
+        rows = self.conn.execute(
+            "SELECT triage_reason AS reason, COUNT(*) AS n FROM items "
+            "WHERE state = ? AND triage_reason IS NOT NULL GROUP BY triage_reason",
+            (State.TRIAGED.value,),
+        )
+        return {row["reason"]: row["n"] for row in rows}
+
+    def date_sources(self) -> dict[str, int]:
+        """How each processed item got its date. The tier mix is a health signal."""
+        rows = self.conn.execute(
+            "SELECT date_source AS src, COUNT(*) AS n FROM items "
+            "WHERE date_source IS NOT NULL GROUP BY date_source",
+        )
+        return {row["src"]: row["n"] for row in rows}
+
+    def dest_path_taken(self, dest_path: str) -> bool:
+        row = self.conn.execute(
+            "SELECT 1 FROM items WHERE dest_path = ? LIMIT 1", (dest_path,)
+        ).fetchone()
+        return row is not None
+
     def forget(self, source_id: str, src_path: str, src_hash: str = "") -> None:
         """Remove an item so it will be re-ingested. Used by recovery tooling only."""
         with self.transaction() as conn:

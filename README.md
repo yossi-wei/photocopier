@@ -4,9 +4,9 @@ Moves photos and video from OneDrive camera uploads into a NAS library organized
 `photos/YYYY/MM/` and `video/YYYY/` — automatically, daily, and correctly even when the
 NAS has been unreachable for three weeks.
 
-> **Status: phases 0–1 complete.** `doctor`, `ingest`, and `status` work, with 130 tests
-> passing on macOS and Linux. Files land in the spool; nothing is filed or delivered to
-> the NAS yet — that is phases 2 and 3. The roadmap below is honest about what exists.
+> **Status: phases 0–2 complete.** `doctor`, `ingest`, `process`, `validate`, and
+> `status` work, with 208 tests passing on macOS and Linux. Files are fetched and filed
+> into an exact replica of the NAS layout; delivery to the NAS is phase 3.
 
 ---
 
@@ -83,7 +83,7 @@ Computed from the ledger by `photocopier status` — instrumented, not aspiratio
 |---|---|---|
 | 0 | Repo, config loader, `doctor` | ✅ |
 | 1 | Ledger + `ingest` | ✅ |
-| 2 | `process` — dates, layout, naming, triage | ☐ |
+| 2 | `process` — dates, layout, naming, triage | ✅ |
 | 3 | `flush` — guards, verified delivery | ☐ |
 | 4 | Scheduling, full `status` metrics, initial backfill | ☐ |
 | 5 | Port to run on the NAS directly | ☐ |
@@ -96,7 +96,9 @@ Phase 3 is the line where this stops being a staging tool and starts filing phot
 photocopier doctor              # check environment and configuration
 photocopier ingest --dry-run    # report what would come down
 photocopier ingest              # fetch new files into the spool
-photocopier status              # spool usage and ledger state
+photocopier process             # file them into the outbox replica
+photocopier validate PATH       # check date rules against an already-filed library
+photocopier status              # spool usage, ledger state, triage counts
 ```
 
 A run, with two phones configured:
@@ -122,6 +124,31 @@ phone-2: ingested 0 file(s), 0 B
     (2 seen, 2 already in ledger, 0 before cutoff, 0 junk)
 
 total: ingested 0 file(s), 0 B
+```
+
+Then filing them, with the tier mix reported so a drift toward weaker sources is visible:
+
+```
+$ photocopier process
+filed 7 file(s)
+triaged      2
+date source  exif=1, filename=5, none=1, srcpath=1
+
+2 file(s) need review (no_date=1, unknown_type=1)
+inspect them under the spool's triage/ directory
+```
+
+`validate` checks the date rules against a library that is already filed correctly —
+the folder a photo sits in is an answer a human already gave, which makes an existing
+library a labelled dataset:
+
+```
+$ photocopier validate /Volumes/media/photos
+  files checked   2268
+  agree           2249  (99.16%)
+  disagree        0
+  unresolved      19  -> would go to triage
+  resolved by     exif=2249, none=19
 ```
 
 `doctor` is deliberately blunt about the failure mode that matters most:
@@ -175,7 +202,7 @@ See [`config.example.toml`](config.example.toml) for the full schema.
 ## Testing
 
 ```bash
-pytest -q        # 130 tests, ~15s, no network and no credentials
+pytest -q        # 208 tests, ~15s, no network and no credentials
 ```
 
 A stub `rclone` stands in for the real binary and serves a fixture tree, so the whole

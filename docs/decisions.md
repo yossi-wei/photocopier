@@ -190,3 +190,60 @@ unchanged and stage 3 is deleted. That is a planned deletion, not a regression.
 **Why this is in the log.** The most useful thing found during design was that a
 requirement might not need to exist. It's worth recording that the answer to "how do we
 handle the NAS being unreachable" was very nearly "stop putting the laptop in the middle."
+
+---
+
+## D9 — exifread as the only runtime dependency
+
+**Context.** Filing by capture date needs EXIF. The project had zero runtime
+dependencies, deliberately: it keeps the eventual NAS port (D8) to "copy the code and
+run it."
+
+**Options.** Hand-roll an EXIF parser (~80 lines of binary TIFF/IFD walking), or take a
+dependency.
+
+**Decision.** Depend on `exifread`.
+
+**Why.** It is pure Python with no C extensions and no build step, so it installs in a
+TrueNAS jail as easily as on a laptop — the property that made zero-dependency
+attractive is preserved. The alternative trades a widely-used library for bespoke binary
+parsing that would then need its own test suite, to save one `pip install` line.
+
+**Consequence.** All exifread contact is confined to `read_tags()` in `exif.py`, so the
+tier-selection logic is testable without image files and the library could be swapped
+without touching anything else. It logs to the console for ordinary conditions — a PNG
+with no EXIF prints a message — so its logger is silenced at import; that noise would
+otherwise corrupt command output.
+
+---
+
+## D10 — EXIF is the top date tier, and no timezone maths is applied
+
+**Context.** Files must be filed by the local date the photo was taken. EXIF, the
+filename, and the OneDrive source path all offer a date.
+
+**Measured, not assumed.** The existing hand-filed library is a labelled dataset: the
+folder a file sits in is the answer a human already gave. Running the resolver over
+2268 files from 2023–2026 and comparing:
+
+| Chain | Agreement | Disagreements |
+|---|---|---|
+| filename → srcpath | 99.0% | 3 |
+| EXIF → filename → srcpath | **99.16%** | **0** |
+
+**The three disagreements were all the same bug.** `PXL_20251101_0210*` filed under
+2025/10. Pixel filenames are UTC; 02:10 UTC on 1 November is 22:10 local on 31 October.
+The manual filing was right and the filename tier was wrong, every time within two hours
+of a month boundary.
+
+**Decision.** EXIF `DateTimeOriginal` first, then `DateTimeDigitized`, then `DateTime`,
+then the filename, then the source path, then triage.
+
+**The useful non-finding.** `OffsetTimeOriginal` is present on 99% of the library, and
+is not used. EXIF datetimes are already local time at capture, which is exactly the
+question being asked. Applying the offset would reintroduce the very error it looked
+like it existed to fix. The tier is simpler than planned.
+
+**Consequence.** `photocopier validate` ships as a command so this measurement is
+reproducible by anyone with a filed library, rather than being a number asserted in a
+commit message.

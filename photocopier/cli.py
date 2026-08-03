@@ -21,8 +21,12 @@ from .guards import (
 )
 from .ingest import ingest, render
 from .ledger import Ledger, State
+from .process import process
+from .process import render as render_process
 from .rclone import Rclone
 from .spool import Spool
+from .validate import render as render_validate
+from .validate import validate
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -43,6 +47,22 @@ def build_parser() -> argparse.ArgumentParser:
     )
     ingest_parser.add_argument("--source", metavar="ID", help="limit to one configured source")
 
+    process_parser = sub.add_parser(
+        "process", help="file spooled files into the outbox replica of the NAS layout"
+    )
+    process_parser.add_argument(
+        "--dry-run", action="store_true", help="report what would be filed"
+    )
+
+    validate_parser = sub.add_parser(
+        "validate",
+        help="check date resolution against an already-filed library (read-only)",
+    )
+    validate_parser.add_argument("path", help="a YYYY/MM or YYYY tree to check against")
+    validate_parser.add_argument(
+        "--limit", type=int, default=0, metavar="N", help="stop after N files"
+    )
+
     sub.add_parser("status", help="show spool and ledger state")
     return parser
 
@@ -55,6 +75,10 @@ def main(argv: list[str] | None = None) -> int:
             return cmd_doctor(args)
         if args.command == "ingest":
             return cmd_ingest(args)
+        if args.command == "process":
+            return cmd_process(args)
+        if args.command == "validate":
+            return cmd_validate(args)
         if args.command == "status":
             return cmd_status(args)
     except PhotocopierError as exc:
@@ -152,6 +176,32 @@ def cmd_ingest(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_process(args: argparse.Namespace) -> int:
+    cfg = config_module.load(args.config)
+    spool = Spool.from_config(cfg.spool)
+
+    check_spool_not_in_sync_root(spool.root)
+    spool.ensure()
+    check_same_filesystem(spool.incoming, spool.outbox)
+
+    with Ledger(spool.ledger_path) as ledger:
+        result = process(cfg, ledger, spool, dry_run=args.dry_run)
+        print(render_process(result))
+
+    return 1 if result.missing else 0
+
+
+def cmd_validate(args: argparse.Namespace) -> int:
+    cfg = config_module.load(args.config)
+    root = config_module.expand(args.path)
+    if not root.is_dir():
+        raise GuardError(f"{root} is not a directory")
+
+    result = validate(root, cfg.classify, limit=args.limit)
+    print(render_validate(result, root))
+    return 1 if result.disagree else 0
+
+
 def cmd_status(args: argparse.Namespace) -> int:
     cfg = config_module.load(args.config)
     spool = Spool.from_config(cfg.spool)
@@ -171,10 +221,23 @@ def cmd_status(args: argparse.Namespace) -> int:
         for state in State:
             print(f"  {state.value:<12} {counts.get(state.value, 0)}")
 
+        if sources := ledger.date_sources():
+            mix = ", ".join(f"{k}={v}" for k, v in sorted(sources.items()))
+            print(f"\ndate resolved by  {mix}")
+
+        if reasons := ledger.triage_reasons():
+            detail = ", ".join(f"{k}={v}" for k, v in sorted(reasons.items()))
+            print(f"awaiting review   {detail}")
+            print(f"                  {spool.triage}")
+
         awaiting = ledger.count_in_state(State.INGESTED)
         if awaiting:
             size = ledger.total_bytes_in_state(State.INGESTED)
             print(f"\n{awaiting} file(s) in the spool awaiting processing ({human_bytes(size)})")
+
+        staged = ledger.count_in_state(State.PROCESSED)
+        if staged:
+            print(f"{staged} file(s) staged in the outbox awaiting delivery")
     return 0
 
 

@@ -191,7 +191,8 @@ The ledger survives the flush. That is its entire reason for existing.
 
 Applied in stage 2, when the file is local:
 
-1. **EXIF `DateTimeOriginal`** — jpg/heic. Authoritative.
+1. **EXIF `DateTimeOriginal`**, then `DateTimeDigitized`, then `DateTime`. Local time
+   at capture, used as-is — no timezone arithmetic. See D10.
 2. **Filename pattern** — `PXL_YYYYMMDD_*`, `YYYYMMDD_HHMMSS`, `IMG_YYYYMMDD_*`.
    Covers mp4, which carries no EXIF. Both current sources use these.
 3. **Source path** `YYYY/MM/` from the OneDrive tree.
@@ -327,7 +328,7 @@ Each phase is independently verifiable before the next exists.
 |---|---|---|---|
 | 0 | Repo skeleton, MIT LICENSE, pyproject, CI, config loader, `doctor` | `doctor` reports a clean environment | ✅ |
 | 1 | Ledger + `ingest`, `--dry-run` first | Enumerates both sources, respects cutoff, downloads nothing twice | ✅ |
-| 2 | `process` — dates, layout, naming, triage | `outbox/` is a byte-exact replica of intended NAS layout | |
+| 2 | `process` — dates, layout, naming, triage | `outbox/` is a byte-exact replica of intended NAS layout | ✅ |
 | 3 | `flush` — guards, verified move, conflict policy | Delivers to NAS; survives an unmounted share | |
 | 4 | launchd scheduling, full `status` metrics, initial backfill | Runs unattended for a week | |
 | 5 | NAS port — destination adapter, drop stage 3 | Same code, local destination | |

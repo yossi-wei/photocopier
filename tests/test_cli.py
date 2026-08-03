@@ -8,6 +8,7 @@ is still a failed run.
 
 from __future__ import annotations
 
+import shutil
 from pathlib import Path
 
 import pytest
@@ -16,7 +17,7 @@ from photocopier.cli import main
 from photocopier.ingest import IngestResult, SourceResult, render
 from photocopier.spool import Spool
 
-from .conftest import FAKE_RCLONE, populate
+from .conftest import FAKE_RCLONE, FIXTURES, populate
 
 CAMERA_ROLL = "Camera Roll"
 
@@ -191,3 +192,64 @@ def test_version(capsys: pytest.CaptureFixture[str]) -> None:
         main(["--version"])
     assert exc.value.code == 0
     assert "photocopier" in capsys.readouterr().out
+
+
+class TestProcessCommand:
+    def test_files_and_reports(
+        self, config_file: Path, loaded: Path, spool_root: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        main(["-c", str(config_file), "ingest"])
+        capsys.readouterr()
+
+        assert main(["-c", str(config_file), "process"]) == 0
+        out = capsys.readouterr().out
+
+        assert "filed 2 file(s)" in out
+        assert (spool_root / "outbox/photos/2026/06/PXL_20260601_112702768_phone-1.jpg").is_file()
+        assert (spool_root / "outbox/video/2026/PXL_20260602_091500_phone-1.mp4").is_file()
+
+    def test_dry_run_stages_nothing(
+        self, config_file: Path, loaded: Path, spool_root: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        main(["-c", str(config_file), "ingest"])
+        capsys.readouterr()
+
+        assert main(["-c", str(config_file), "process", "--dry-run"]) == 0
+        assert "would file 2 file(s)" in capsys.readouterr().out
+        assert not list((spool_root / "outbox").rglob("*.jpg"))
+
+    def test_nothing_to_do_is_success(
+        self, config_file: Path, remote_root: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        assert main(["-c", str(config_file), "process"]) == 0
+        assert "filed 0 file(s)" in capsys.readouterr().out
+
+
+class TestValidateCommand:
+    def test_reports_agreement(
+        self, config_file: Path, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        library = tmp_path / "library" / "2026" / "10"
+        library.mkdir(parents=True)
+        shutil.copy2(FIXTURES / "PXL_20261101_021009424.jpg", library / "a.jpg")
+
+        assert main(["-c", str(config_file), "validate", str(tmp_path / "library")]) == 0
+        out = capsys.readouterr().out
+        assert "agree           1" in out
+        assert "exif=1" in out
+
+    def test_nonzero_exit_on_disagreement(
+        self, config_file: Path, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        library = tmp_path / "library" / "2026" / "11"
+        library.mkdir(parents=True)
+        shutil.copy2(FIXTURES / "PXL_20261101_021009424.jpg", library / "a.jpg")
+
+        assert main(["-c", str(config_file), "validate", str(tmp_path / "library")]) == 1
+        assert "disagreements:" in capsys.readouterr().out
+
+    def test_missing_directory_is_a_clean_error(
+        self, config_file: Path, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        assert main(["-c", str(config_file), "validate", str(tmp_path / "absent")]) == 1
+        assert "not a directory" in capsys.readouterr().err
