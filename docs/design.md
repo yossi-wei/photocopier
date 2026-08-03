@@ -329,7 +329,7 @@ Each phase is independently verifiable before the next exists.
 | 0 | Repo skeleton, MIT LICENSE, pyproject, CI, config loader, `doctor` | `doctor` reports a clean environment | ✅ |
 | 1 | Ledger + `ingest`, `--dry-run` first | Enumerates both sources, respects cutoff, downloads nothing twice | ✅ |
 | 2 | `process` — dates, layout, naming, triage | `outbox/` is a byte-exact replica of intended NAS layout | ✅ |
-| 3 | `flush` — guards, verified move, conflict policy | Delivers to NAS; survives an unmounted share | |
+| 3 | `flush` — guards, verified move, conflict policy | Delivers to NAS; survives an unmounted share | ✅ |
 | 4 | launchd scheduling, full `status` metrics, initial backfill | Runs unattended for a week | |
 | 5 | NAS port — destination adapter, drop stage 3 | Same code, local destination | |
 

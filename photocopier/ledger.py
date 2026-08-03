@@ -73,6 +73,7 @@ class Item:
     src_hash: str
     state: State
     spool_path: str | None
+    dest_path: str | None = None
 
 
 def _now() -> str:
@@ -293,6 +294,32 @@ class Ledger:
                 ),
             )
 
+    def mark_delivered(self, item_id: int, *, dest_path: str) -> None:
+        """Record a file confirmed present and verified at its destination.
+
+        spool_path is cleared: the item no longer occupies the spool, and this is what
+        makes the emptied spool safe. The row remains as the memory that stops ingest
+        fetching the file again. See D1.
+        """
+        with self.transaction() as conn:
+            conn.execute(
+                """
+                UPDATE items SET
+                  state = ?, spool_path = NULL, dest_path = ?,
+                  delivered_at = ?, last_error = NULL
+                WHERE id = ?
+                """,
+                (State.DELIVERED.value, dest_path, _now(), item_id),
+            )
+
+    def record_error(self, item_id: int, error: str) -> None:
+        """Note a failure without changing state, so the item is retried as-is."""
+        with self.transaction() as conn:
+            conn.execute(
+                "UPDATE items SET attempts = attempts + 1, last_error = ? WHERE id = ?",
+                (error, item_id),
+            )
+
     def triage_reasons(self) -> dict[str, int]:
         rows = self.conn.execute(
             "SELECT triage_reason AS reason, COUNT(*) AS n FROM items "
@@ -333,4 +360,5 @@ def _row_to_item(row: sqlite3.Row) -> Item:
         src_hash=row["src_hash"],
         state=State(row["state"]),
         spool_path=row["spool_path"],
+        dest_path=row["dest_path"],
     )

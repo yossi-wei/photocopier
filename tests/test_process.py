@@ -290,3 +290,15 @@ def test_triage_rejects_unknown_reasons(spool: Spool, reason: str) -> None:
     assert triage.path_for(reason, "phone-1", "a.jpg")
     with pytest.raises(ValueError, match="unknown triage reason"):
         triage.path_for("made_up", "phone-1", "a.jpg")
+
+
+def test_triage_leaves_no_empty_directories(config, spool: Spool, remote_root: Path) -> None:
+    """Filed items pruned their parents but triaged ones did not, so the incoming tree
+    slowly accumulated empty skeletons across runs.
+    """
+    place(remote_root, "1969/1J1A3188.jpg", "1J1A3188.jpg")
+    run_ingest(config, spool)
+    run_process(config, spool)
+
+    assert not (spool.incoming / "phone-1" / "1969").exists()
+    assert not (spool.incoming / "phone-1").exists()

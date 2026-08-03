@@ -35,13 +35,20 @@ def spool_root(tmp_path: Path) -> Path:
     return tmp_path / "spool"
 
 
-def make_config(spool_root: Path, *, sources: list[dict] | None = None, cap_gb: int = 20):
+def make_config(
+    spool_root: Path,
+    *,
+    sources: list[dict] | None = None,
+    cap_gb: int = 20,
+    nas: Path | None = None,
+):
+    nas = nas or Path("/tmp/nas")
     raw = {
         "spool": {"path": str(spool_root), "cap_gb": cap_gb},
         "destination": {
-            "photos_root": "/tmp/nas/photos",
-            "video_root": "/tmp/nas/video",
-            "mount_point": "/tmp/nas",
+            "photos_root": str(nas / "photos"),
+            "video_root": str(nas / "video"),
+            "mount_point": str(nas),
         },
         "rclone": {"remote": "onedrive", "binary": str(FAKE_RCLONE), "transfers": 2},
         "source": sources

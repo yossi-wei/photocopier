@@ -4,9 +4,9 @@ Moves photos and video from OneDrive camera uploads into a NAS library organized
 `photos/YYYY/MM/` and `video/YYYY/` — automatically, daily, and correctly even when the
 NAS has been unreachable for three weeks.
 
-> **Status: phases 0–2 complete.** `doctor`, `ingest`, `process`, `validate`, and
-> `status` work, with 208 tests passing on macOS and Linux. Files are fetched and filed
-> into an exact replica of the NAS layout; delivery to the NAS is phase 3.
+> **Status: phases 0–3 complete — the pipeline works end to end.** Photos and video go
+> from OneDrive to the NAS, filed by capture date, verified on arrival. 230 tests pass on
+> macOS and Linux. What remains is scheduling and the port to run on the NAS itself.
 
 ---
 
@@ -84,11 +84,9 @@ Computed from the ledger by `photocopier status` — instrumented, not aspiratio
 | 0 | Repo, config loader, `doctor` | ✅ |
 | 1 | Ledger + `ingest` | ✅ |
 | 2 | `process` — dates, layout, naming, triage | ✅ |
-| 3 | `flush` — guards, verified delivery | ☐ |
+| 3 | `flush` — guards, verified delivery | ✅ |
 | 4 | Scheduling, full `status` metrics, initial backfill | ☐ |
 | 5 | Port to run on the NAS directly | ☐ |
-
-Phase 3 is the line where this stops being a staging tool and starts filing photos.
 
 ## Usage
 
@@ -97,6 +95,7 @@ photocopier doctor              # check environment and configuration
 photocopier ingest --dry-run    # report what would come down
 photocopier ingest              # fetch new files into the spool
 photocopier process             # file them into the outbox replica
+photocopier flush               # deliver to the NAS, verified, and reclaim the spool
 photocopier validate PATH       # check date rules against an already-filed library
 photocopier status              # spool usage, ledger state, triage counts
 ```
@@ -151,6 +150,14 @@ $ photocopier validate /Volumes/media/photos
   resolved by     exif=2249, none=19
 ```
 
+Delivery verifies by reading back from the destination and hashing, then reclaims the
+spool:
+
+```
+$ photocopier flush
+delivered 7 file(s), 4.9 MB
+```
+
 `doctor` is deliberately blunt about the failure mode that matters most:
 
 ```
@@ -202,7 +209,7 @@ See [`config.example.toml`](config.example.toml) for the full schema.
 ## Testing
 
 ```bash
-pytest -q        # 208 tests, ~15s, no network and no credentials
+pytest -q        # 230 tests, ~15s, no network and no credentials
 ```
 
 A stub `rclone` stands in for the real binary and serves a fixture tree, so the whole
@@ -210,8 +217,10 @@ pipeline runs hermetically. CI covers Python 3.11–3.13 on macOS and Linux.
 
 The tests that matter most:
 
-- `test_emptied_spool_does_not_trigger_redownload` — the regression the ledger exists to
-  prevent. Delivery empties the spool; the next run must not treat that as a fresh start
+- `test_flush_then_ingest_does_not_redownload` — the regression the ledger exists to
+  prevent, through a real delivery: ingest, process, deliver, ingest again. The spool is
+  legitimately empty at that point, and a source-vs-destination comparison would call the
+  entire library new
 - `test_unmounted_share_is_refused` — when the share is gone, the mount point still exists
   as an empty local directory, and a naive delivery would write the backlog to the boot
   disk and report success

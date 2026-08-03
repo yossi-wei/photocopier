@@ -82,7 +82,7 @@ def process_item(
 
     if kind == "unknown":
         _triage(item, source, UNKNOWN_TYPE, f"unrecognised extension: {filename}",
-                triage, ledger, result, dry_run=dry_run)
+                triage, ledger, result, spool, dry_run=dry_run)
         return
 
     when, date_source = resolve(source, item.src_path, filename, try_exif=kind == "photo")
@@ -90,7 +90,7 @@ def process_item(
 
     if when is None:
         _triage(item, source, NO_DATE, "no date in EXIF, filename, or source path",
-                triage, ledger, result, dry_run=dry_run)
+                triage, ledger, result, spool, dry_run=dry_run)
         return
 
     suffix = config.source(item.source_id).suffix
@@ -113,7 +113,7 @@ def process_item(
             return
         _triage(item, source, DEST_CONFLICT,
                 f"different content already staged at {destination.relative}",
-                triage, ledger, result, dry_run=dry_run)
+                triage, ledger, result, spool, dry_run=dry_run)
         return
 
     result.filed.append((item, destination))
@@ -139,6 +139,7 @@ def _triage(
     triage: Triage,
     ledger: Ledger,
     result: ProcessResult,
+    spool: Spool,
     *,
     dry_run: bool,
 ) -> None:
@@ -158,6 +159,7 @@ def _triage(
         detail=detail,
     )
     ledger.mark_triaged(item.id, spool_path=target, reason=reason)
+    _prune_empty(spool.incoming, source.parent)
 
 
 def process(

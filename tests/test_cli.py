@@ -253,3 +253,36 @@ class TestValidateCommand:
     ) -> None:
         assert main(["-c", str(config_file), "validate", str(tmp_path / "absent")]) == 1
         assert "not a directory" in capsys.readouterr().err
+
+
+class TestFlushCommand:
+    def test_unmounted_share_fails_the_command_cleanly(
+        self, config_file: Path, loaded: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """doctor warns about this; flush must refuse outright.
+
+        The config's mount_point is an ordinary temp directory, exactly like an SMB
+        share that has dropped.
+        """
+        main(["-c", str(config_file), "ingest"])
+        main(["-c", str(config_file), "process"])
+        capsys.readouterr()
+
+        assert main(["-c", str(config_file), "flush"]) == 1
+        assert "not a mount point" in capsys.readouterr().err
+
+    def test_nothing_staged_is_reported_not_an_error(
+        self, config_file: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        import os
+
+        nas = tmp_path / "nas"  # already created by the config_file fixture
+        (nas / ".photocopier-marker").touch()
+        real_ismount = os.path.ismount
+        monkeypatch.setattr(
+            os.path, "ismount", lambda p: True if Path(p) == nas else real_ismount(p)
+        )
+
+        assert main(["-c", str(config_file), "flush"]) == 0
+        assert "nothing staged" in capsys.readouterr().out

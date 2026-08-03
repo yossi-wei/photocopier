@@ -1,7 +1,10 @@
 """Command line interface.
 
-Phase 1 ships `doctor`, `ingest`, and a minimal `status`. `process` and `flush` arrive
-in phases 2 and 3.
+The pipeline is three commands — `ingest`, `process`, `flush` — plus `doctor` to check
+the environment, `validate` to measure date resolution against an already-filed library,
+and `status` to report ledger state.
+
+Every stage that changes anything takes `--dry-run`.
 """
 
 from __future__ import annotations
@@ -12,6 +15,8 @@ import sys
 from . import __version__
 from . import config as config_module
 from .errors import GuardError, PhotocopierError
+from .flush import flush
+from .flush import render as render_flush
 from .guards import (
     Check,
     check_mount_live,
@@ -54,6 +59,13 @@ def build_parser() -> argparse.ArgumentParser:
         "--dry-run", action="store_true", help="report what would be filed"
     )
 
+    flush_parser = sub.add_parser(
+        "flush", help="deliver the staged outbox to the NAS and reclaim the spool"
+    )
+    flush_parser.add_argument(
+        "--dry-run", action="store_true", help="report what would be delivered"
+    )
+
     validate_parser = sub.add_parser(
         "validate",
         help="check date resolution against an already-filed library (read-only)",
@@ -77,6 +89,8 @@ def main(argv: list[str] | None = None) -> int:
             return cmd_ingest(args)
         if args.command == "process":
             return cmd_process(args)
+        if args.command == "flush":
+            return cmd_flush(args)
         if args.command == "validate":
             return cmd_validate(args)
         if args.command == "status":
@@ -189,6 +203,23 @@ def cmd_process(args: argparse.Namespace) -> int:
         print(render_process(result))
 
     return 1 if result.missing else 0
+
+
+def cmd_flush(args: argparse.Namespace) -> int:
+    cfg = config_module.load(args.config)
+    spool = Spool.from_config(cfg.spool)
+
+    check_spool_not_in_sync_root(spool.root)
+    spool.ensure()
+
+    with Ledger(spool.ledger_path) as ledger:
+        # The mount guard lives inside flush() so it also protects any other caller.
+        # An unmounted share is fatal here, unlike in doctor: delivering into an empty
+        # local directory would write the whole backlog to the boot disk.
+        result = flush(cfg, ledger, spool, dry_run=args.dry_run)
+        print(render_flush(result))
+
+    return 1 if (result.failed or result.missing) else 0
 
 
 def cmd_validate(args: argparse.Namespace) -> int:
