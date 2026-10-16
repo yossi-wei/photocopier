@@ -20,7 +20,7 @@ the wrong month while missing dates route to triage. See D4.
 from __future__ import annotations
 
 import re
-from datetime import date
+from datetime import date, datetime, timezone
 from pathlib import Path
 
 from .exif import capture_datetime
@@ -32,9 +32,10 @@ MAX_YEAR = 2100
 
 # Ordered by confidence. Each must capture year/month/day groups.
 FILENAME_PATTERNS: tuple[re.Pattern[str], ...] = (
-    # PXL_20260601_112702768.jpg, VID_20240103_101500.mp4, IMG_20221231_235959.jpg
+    # PXL_20260601_112702768.jpg, VID_20240103_101500.mp4, IMG_20221231_235959.jpg,
+    # Screenshot_20250608-073110.png
     re.compile(
-        r"(?:PXL|IMG|VID|MVIMG|PANO)[_-](?P<y>\d{4})(?P<m>\d{2})(?P<d>\d{2})[_-]",
+        r"(?:PXL|IMG|VID|MVIMG|PANO|Screenshot)[_-](?P<y>\d{4})(?P<m>\d{2})(?P<d>\d{2})[_-]",
         re.IGNORECASE,
     ),
     # 20210706_142116.jpg
@@ -44,6 +45,10 @@ FILENAME_PATTERNS: tuple[re.Pattern[str], ...] = (
     # Signal-2024-07-04-120000.jpg and similar prefixed forms
     re.compile(r"[_-](?P<y>\d{4})-(?P<m>\d{2})-(?P<d>\d{2})[_-]"),
 )
+
+# 1776778281073.mp4, img_1_1749913720949.jpg: Unix epoch in milliseconds, as written by
+# some gallery and screen-capture apps. Thirteen digits starting with 1 covers 2001-2286.
+EPOCH_MS_PATTERN = re.compile(r"^(?:img_\d+_)?(?P<ms>1\d{12})(?:\.|$)", re.IGNORECASE)
 
 # .../2026/06/... as produced by the OneDrive mobile app's date organization.
 PATH_PATTERN = re.compile(r"(?:^|/)(?P<y>\d{4})/(?P<m>\d{1,2})(?:/|$)")
@@ -69,6 +74,13 @@ def date_from_filename(filename: str) -> date | None:
         resolved = _build(int(match["y"]), int(match["m"]), int(match["d"]))
         if resolved:
             return resolved
+    if match := EPOCH_MS_PATTERN.search(filename):
+        # UTC: month-level filing makes the few-hours offset from local time immaterial.
+        try:
+            stamp = datetime.fromtimestamp(int(match["ms"]) / 1000, tz=timezone.utc)
+        except (OverflowError, OSError, ValueError):
+            return None
+        return _build(stamp.year, stamp.month, stamp.day)
     return None
 
 

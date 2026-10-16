@@ -29,6 +29,9 @@ from photocopier.dates import (
         ("20210706_142116.jpg", date(2021, 7, 6)),
         ("2024-07-04 12.00.00.jpg", date(2024, 7, 4)),
         ("Signal-2024-07-04-120000.jpg", date(2024, 7, 4)),
+        ("Screenshot_20250608-073110.png", date(2025, 6, 8)),
+        ("1776778281073.mp4", date(2026, 4, 21)),
+        ("img_6_1749913720949.jpg", date(2025, 6, 14)),
     ],
 )
 def test_date_from_filename(filename: str, expected: date) -> None:
@@ -43,6 +46,9 @@ def test_date_from_filename(filename: str, expected: date) -> None:
         "PXL_20261301_120000.jpg",  # month 13
         "PXL_20260632_120000.jpg",  # day 32
         "19700101_000000.jpg",      # epoch zero, below MIN_YEAR
+        "0000000000000.mp4",        # zeroed epoch, not a plausible timestamp
+        "9999999999999.mp4",        # 13 digits, but not starting with 1
+        "img_6_12345.jpg",          # short number is a counter, not an epoch
         "",
     ],
 )
