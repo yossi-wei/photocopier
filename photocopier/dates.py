@@ -20,7 +20,7 @@ the wrong month while missing dates route to triage. See D4.
 from __future__ import annotations
 
 import re
-from datetime import date, datetime, timezone
+from datetime import UTC, date, datetime
 from pathlib import Path
 
 from .exif import capture_datetime
@@ -77,7 +77,7 @@ def date_from_filename(filename: str) -> date | None:
     if match := EPOCH_MS_PATTERN.search(filename):
         # UTC: month-level filing makes the few-hours offset from local time immaterial.
         try:
-            stamp = datetime.fromtimestamp(int(match["ms"]) / 1000, tz=timezone.utc)
+            stamp = datetime.fromtimestamp(int(match["ms"]) / 1000, tz=UTC)
         except (OverflowError, OSError, ValueError):
             return None
         return _build(stamp.year, stamp.month, stamp.day)
