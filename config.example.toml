@@ -34,7 +34,7 @@ bwlimit   = ""          # e.g. "2M" to be polite on hotel wifi
 [[source]]
 id     = "phone-1"                 # stable identifier, used in the ledger
 path   = "Camera Roll"           # folder within the remote
-suffix = "phone-1"                 # appended to filenames: PXL_20260601_112702768_yossi.jpg
+suffix = "phone-1"                 # appended to filenames: PXL_20260601_112702768_phone-1.jpg
 cutoff = "2026-01-01"            # material before this date was filed manually
 
 [[source]]
