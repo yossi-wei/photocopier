@@ -4,9 +4,11 @@ Moves photos and video from OneDrive camera uploads into a NAS library organized
 `photos/YYYY/MM/` and `video/YYYY/` — automatically, daily, and correctly even when the
 NAS has been unreachable for three weeks.
 
-> **Status: phases 0–3 complete — the pipeline works end to end.** Photos and video go
-> from OneDrive to the NAS, filed by capture date, verified on arrival. 230 tests pass on
-> macOS and Linux. What remains is scheduling and the port to run on the NAS itself.
+> **Status: phases 0–3 complete, phase 4 in progress — the pipeline works end to end on real
+> data.** Photos and video go from OneDrive to the NAS, filed by capture date, verified on
+> arrival. The initial backfill is done and it now runs four times a day under launchd; the
+> exit test (a week unattended) and the `status` success metrics are still to come. 236 tests
+> pass on macOS and Linux. After that: the port to run on the NAS itself.
 
 ---
 
@@ -85,7 +87,7 @@ Computed from the ledger by `photocopier status` — instrumented, not aspiratio
 | 1 | Ledger + `ingest` | ✅ |
 | 2 | `process` — dates, layout, naming, triage | ✅ |
 | 3 | `flush` — guards, verified delivery | ✅ |
-| 4 | Scheduling, full `status` metrics, initial backfill | ☐ |
+| 4 | Scheduling ✅, initial backfill ✅, full `status` metrics ☐ — exit test: a week unattended | 🚧 |
 | 5 | Port to run on the NAS directly | ☐ |
 
 ## Running unattended (macOS launchd)
