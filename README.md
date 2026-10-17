@@ -88,6 +88,28 @@ Computed from the ledger by `photocopier status` — instrumented, not aspiratio
 | 4 | Scheduling, full `status` metrics, initial backfill | ☐ |
 | 5 | Port to run on the NAS directly | ☐ |
 
+## Running unattended (macOS launchd)
+
+`scripts/photocopier-run.sh` runs one full pass (`ingest`, `process`, `flush`) the way a
+scheduler needs it, and is configured only through environment variables (see its header):
+
+- takes a lock shared with other NAS jobs and skips the pass if another job holds it;
+- treats "NAS not mounted" as normal: ingest still runs and spools, delivery waits, and it
+  tries one remount if `NAS_URL` is set;
+- puts a time limit on every step;
+- emails (through `NOTIFY_CMD`) at most one failure message per 24 hours for the same
+  failure, plus one summary the first time it runs on each calendar day (local time), which
+  flags failures, triaged files, and undelivered files older than `BACKLOG_WARN_DAYS`.
+
+macOS refuses to let launchd read `~/Documents`, so schedule an installed copy, not the
+checkout: install the package into a venv outside it (`uv venv ~/.local/share/photocopier/venv`,
+then `uv pip install --python ~/.local/share/photocopier/venv/bin/python .`), keep the config at
+`~/.config/photocopier/config.toml`, and `install -m 755 scripts/photocopier-run.sh
+~/.local/bin/photocopier-run`. Re-install after changing code. The first time a background
+job touches the NAS share, macOS asks for permission; trigger that once yourself with a
+`PHOTOCOPIER_DRY_RUN=1` launchd test job while you are at the machine, or an unattended run
+will wait for a click.
+
 ## Usage
 
 ```bash
