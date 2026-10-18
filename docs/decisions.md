@@ -247,3 +247,39 @@ like it existed to fix. The tier is simpler than planned.
 **Consequence.** `photocopier validate` ships as a command so this measurement is
 reproducible by anyone with a filed library, rather than being a number asserted in a
 commit message.
+
+---
+
+## D11 — Triage is closed out by a command, never by editing the ledger
+
+**Context.** Triage had no way out except filing by hand and then an `UPDATE` in SQLite.
+The scheduled run flags any triaged item as a problem, so an item nobody can close out
+keeps the alert email firing. Hand-editing the one file that must never be lost (D1) is
+the wrong habit to build.
+
+**Decision.** `photocopier triage` lists what is waiting: ledger id, reason, the file,
+and the manifest detail (for `dest_conflict`, the path of the file already there).
+`photocopier resolve <id>` closes one out, with exactly one of two outcomes:
+
+- `--filed-at PATH` — the person filed it themselves. The row becomes `delivered`
+  (spool_path cleared, delivered_at set, dest_path in the usual `photos/…` form) and the
+  triaged copy is deleted.
+- `--discard` — it does not belong in the library. The row becomes a new state,
+  `discarded`, and the triaged copy is deleted. The row is kept because `known_keys()`
+  counts every state but `failed`: deleting it would make ingest fetch the file again.
+
+**Checks on `--filed-at`.** The mount guard runs first, as in flush: a copy made into an
+unmounted share's mount point is on the local disk and would pass an existence check.
+The path must be under photos_root or video_root. If the triaged copy is still there,
+the filed file must be byte-identical to it, so a typo pointing at some other photo
+cannot cost the only spool copy. If the copy has already been moved out of triage by
+hand, existence is all that can be checked.
+
+**Rejected: `--filed-at` onto the conflicting file.** For `dest_conflict` the file
+already at the target is, by definition, different. Keeping it instead is a `--discard`;
+keeping both means filing the triaged copy under another name and pointing at that.
+
+**Consequence.** Ledger first, then the spool delete, matching every other stage. A
+row never points at a deleted file; at worst a stray copy is left in triage. Nothing is
+appended to the manifest: it stays a record of why things were triaged, and the ledger
+row (which keeps `triage_reason`) is the record of how they were closed.

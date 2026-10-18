@@ -166,7 +166,7 @@ CREATE TABLE items (
   src_size      INTEGER NOT NULL,
   src_modtime   TEXT NOT NULL,
   src_hash      TEXT,               -- QuickXorHash from lsjson
-  state         TEXT NOT NULL,      -- discovered|ingested|processed|delivered|triaged|failed
+  state         TEXT NOT NULL,      -- discovered|ingested|processed|delivered|triaged|discarded|failed
   spool_path    TEXT,               -- NULL once delivered
   dest_path     TEXT,               -- NAS-relative
   resolved_date TEXT,
@@ -249,7 +249,9 @@ triage/
 
 Two ways out:
 
-- **One-off** — a decision recorded per item (`photocopier resolve <id> --date 2024-07-04`).
+- **One-off** — file it by hand, then record the decision per item:
+  `photocopier resolve <id> --filed-at <path>` or `--discard` (D11). `photocopier triage`
+  lists the ids.
 - **New rule** — a pattern added to config, then `photocopier reprocess` re-runs stage 2
   over the whole triage area.
 

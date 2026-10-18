@@ -122,6 +122,8 @@ photocopier process             # file them into the outbox replica
 photocopier flush               # deliver to the NAS, verified, and reclaim the spool
 photocopier validate PATH       # check date rules against an already-filed library
 photocopier status              # spool usage, ledger state, triage counts
+photocopier triage              # list files waiting for a decision, with ids and reasons
+photocopier resolve ID --filed-at PATH | --discard   # close one out (D11)
 ```
 
 A run, with two phones configured:

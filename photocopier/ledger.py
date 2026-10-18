@@ -28,6 +28,7 @@ class State(StrEnum):
     PROCESSED = "processed"
     DELIVERED = "delivered"
     TRIAGED = "triaged"
+    DISCARDED = "discarded"
     FAILED = "failed"
 
 
@@ -74,6 +75,7 @@ class Item:
     state: State
     spool_path: str | None
     dest_path: str | None = None
+    triage_reason: str | None = None
 
 
 def _now() -> str:
@@ -175,6 +177,10 @@ class Ledger:
             "SELECT COUNT(*) AS n FROM items WHERE state = ?", (state.value,)
         ).fetchone()
         return int(row["n"])
+
+    def get(self, item_id: int) -> Item | None:
+        row = self.conn.execute("SELECT * FROM items WHERE id = ?", (item_id,)).fetchone()
+        return _row_to_item(row) if row else None
 
     def items_in_state(self, state: State, source_id: str | None = None) -> list[Item]:
         sql = "SELECT * FROM items WHERE state = ?"
@@ -312,6 +318,23 @@ class Ledger:
                 (State.DELIVERED.value, dest_path, _now(), item_id),
             )
 
+    def mark_discarded(self, item_id: int) -> None:
+        """Close out a triaged item that a human decided not to keep.
+
+        The row stays, which is the point: known_keys() counts every state except
+        FAILED, so ingest never fetches the file again. triage_reason is kept as the
+        record of why it never reached the library.
+        """
+        with self.transaction() as conn:
+            conn.execute(
+                """
+                UPDATE items SET
+                  state = ?, spool_path = NULL, dest_path = NULL, last_error = NULL
+                WHERE id = ?
+                """,
+                (State.DISCARDED.value, item_id),
+            )
+
     def record_error(self, item_id: int, error: str) -> None:
         """Note a failure without changing state, so the item is retried as-is."""
         with self.transaction() as conn:
@@ -361,4 +384,5 @@ def _row_to_item(row: sqlite3.Row) -> Item:
         state=State(row["state"]),
         spool_path=row["spool_path"],
         dest_path=row["dest_path"],
+        triage_reason=row["triage_reason"],
     )

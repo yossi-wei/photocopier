@@ -6,7 +6,7 @@ than by guessing.
 
 Two ways out, both in the caller's hands: fix the individual file, or add a rule and
 reprocess the whole area. Nothing in here is ever auto-filed, and nothing in here is
-ever delivered.
+ever delivered. Closing out a single item once a human has decided is resolve.py.
 """
 
 from __future__ import annotations
@@ -108,6 +108,14 @@ class Triage:
                 continue  # a partial final line from an interrupted write
             out.append(TriageEntry(**data))
         return out
+
+    def lookup(self) -> dict[str, TriageEntry]:
+        """The newest manifest entry for each triage path, relative to the triage root.
+
+        A path can appear more than once if an item was triaged, cleared by hand, and
+        triaged again; the latest entry is the one that describes the file there now.
+        """
+        return {entry.triage_path: entry for entry in self.entries()}
 
     def counts(self) -> dict[str, int]:
         counts: dict[str, int] = {}

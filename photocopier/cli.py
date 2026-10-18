@@ -2,7 +2,8 @@
 
 The pipeline is three commands — `ingest`, `process`, `flush` — plus `doctor` to check
 the environment, `validate` to measure date resolution against an already-filed library,
-and `status` to report ledger state.
+`status` to report ledger state, and `triage` / `resolve` to list and close out the
+files a human has to decide about.
 
 Every stage that changes anything takes `--dry-run`.
 """
@@ -29,7 +30,10 @@ from .ledger import Ledger, State
 from .process import process
 from .process import render as render_process
 from .rclone import Rclone
+from .resolve import pending, render_pending, resolve_discard, resolve_filed
+from .resolve import render as render_resolve
 from .spool import Spool
+from .triage import Triage
 from .validate import render as render_validate
 from .validate import validate
 
@@ -76,6 +80,28 @@ def build_parser() -> argparse.ArgumentParser:
     )
 
     sub.add_parser("status", help="show spool and ledger state")
+
+    sub.add_parser("triage", help="list triaged files awaiting a decision")
+
+    resolve_parser = sub.add_parser(
+        "resolve", help="close out a triaged file once you have decided what to do with it"
+    )
+    resolve_parser.add_argument("id", type=int, help="ledger id, as shown by `triage`")
+    outcome = resolve_parser.add_mutually_exclusive_group(required=True)
+    outcome.add_argument(
+        "--filed-at",
+        metavar="PATH",
+        help="where you filed it: an absolute path under photos_root or video_root, "
+        "or photos/YYYY/MM/<name> or video/YYYY/<name>",
+    )
+    outcome.add_argument(
+        "--discard",
+        action="store_true",
+        help="drop it; the ledger keeps the row so it is never fetched again",
+    )
+    resolve_parser.add_argument(
+        "--dry-run", action="store_true", help="report what would change"
+    )
     return parser
 
 
@@ -95,6 +121,10 @@ def main(argv: list[str] | None = None) -> int:
             return cmd_validate(args)
         if args.command == "status":
             return cmd_status(args)
+        if args.command == "triage":
+            return cmd_triage(args)
+        if args.command == "resolve":
+            return cmd_resolve(args)
     except PhotocopierError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1
@@ -269,6 +299,35 @@ def cmd_status(args: argparse.Namespace) -> int:
         staged = ledger.count_in_state(State.PROCESSED)
         if staged:
             print(f"{staged} file(s) staged in the outbox awaiting delivery")
+    return 0
+
+
+def cmd_triage(args: argparse.Namespace) -> int:
+    cfg = config_module.load(args.config)
+    spool = Spool.from_config(cfg.spool)
+    if not spool.ledger_path.exists():
+        print("ledger not created yet — run `photocopier ingest`")
+        return 0
+
+    with Ledger(spool.ledger_path) as ledger:
+        print(render_pending(pending(ledger, Triage(spool.triage)), spool.triage))
+    return 0
+
+
+def cmd_resolve(args: argparse.Namespace) -> int:
+    cfg = config_module.load(args.config)
+    spool = Spool.from_config(cfg.spool)
+    if not spool.ledger_path.exists():
+        raise GuardError(f"no ledger at {spool.ledger_path}")
+
+    with Ledger(spool.ledger_path) as ledger:
+        if args.discard:
+            result = resolve_discard(ledger, spool, args.id, dry_run=args.dry_run)
+        else:
+            result = resolve_filed(
+                cfg, ledger, spool, args.id, args.filed_at, dry_run=args.dry_run
+            )
+        print(render_resolve(result))
     return 0
 
 
