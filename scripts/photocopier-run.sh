@@ -30,6 +30,8 @@ NOTIFY_CMD="${NOTIFY_CMD:-}"
 BACKLOG_WARN_DAYS="${BACKLOG_WARN_DAYS:-3}"
 DRY="${PHOTOCOPIER_DRY_RUN:-}"
 dry=(); [ "$DRY" = 1 ] && dry=(--dry-run)
+# Marks every step as scheduled in the ledger's runs table, for the unattended streak (D13).
+export PHOTOCOPIER_SCHEDULED=1
 
 mkdir -p "$STATE_DIR" "$(dirname "$LOCK")"
 run_log="$STATE_DIR/run-$(date +%Y%m%d-%H%M%S).log"

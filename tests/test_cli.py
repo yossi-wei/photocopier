@@ -15,6 +15,8 @@ import pytest
 
 from photocopier.cli import main
 from photocopier.ingest import IngestResult, SourceResult, render
+from photocopier.ledger import Ledger
+from photocopier.metrics import ENV_SCHEDULED
 from photocopier.spool import Spool
 
 from .conftest import FAKE_RCLONE, FIXTURES, populate
@@ -212,6 +214,80 @@ class TestStatusCommand:
         out = capsys.readouterr().out
         assert "ingested     2" in out
         assert "awaiting processing" in out
+
+
+    def test_reports_the_metrics(
+        self, config_file: Path, loaded: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        main(["-c", str(config_file), "ingest"])
+        capsys.readouterr()
+
+        assert main(["-c", str(config_file), "status"]) == 0
+        out = capsys.readouterr().out
+        assert "metrics (PRD §5)" in out
+        line = next(line for line in out.splitlines() if "manual interventions" in line)
+        assert "1 (1 ingest)" in line
+
+    def test_launcher_can_still_read_the_count(
+        self, config_file: Path, loaded: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """scripts/photocopier-run.sh reads the count with awk '/triaged/ {print $2; exit}'."""
+        main(["-c", str(config_file), "ingest"])
+        capsys.readouterr()
+        main(["-c", str(config_file), "status"])
+
+        first = next(line for line in capsys.readouterr().out.splitlines() if "triaged" in line)
+        assert first.split()[:2] == ["triaged", "0"]
+
+
+class TestRunRecording:
+    def runs(self, spool_root: Path):
+        with Ledger(spool_root / "ledger.db") as ledger:
+            return ledger.runs()
+
+    def test_each_pipeline_command_is_recorded(
+        self, config_file: Path, loaded: Path, spool_root: Path
+    ) -> None:
+        main(["-c", str(config_file), "ingest"])
+        main(["-c", str(config_file), "process", "--dry-run"])
+        main(["-c", str(config_file), "status"])
+
+        runs = self.runs(spool_root)
+        assert [(r.command, r.dry_run, r.ok) for r in runs] == [
+            ("ingest", False, True),
+            ("process", True, True),
+        ]
+        assert not any(r.scheduled for r in runs)
+
+    def test_the_launcher_marks_its_runs(
+        self, config_file: Path, loaded: Path, spool_root: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv(ENV_SCHEDULED, "1")
+        main(["-c", str(config_file), "ingest"])
+        assert self.runs(spool_root)[0].scheduled
+
+    def test_a_failing_command_is_recorded_as_failed(
+        self, config_file: Path, loaded: Path, spool_root: Path
+    ) -> None:
+        main(["-c", str(config_file), "ingest"])
+        assert main(["-c", str(config_file), "flush"]) == 1  # the NAS is not mounted
+
+        flush_run = self.runs(spool_root)[-1]
+        assert (flush_run.command, flush_run.exit_code, flush_run.ok) == ("flush", 1, False)
+
+    def test_no_ledger_is_created_when_the_guard_refuses(
+        self, tmp_path: Path, loaded: Path
+    ) -> None:
+        nas = tmp_path / "nas"
+        nas.mkdir()
+        spool = tmp_path / "OneDrive" / "spool"
+        config = tmp_path / "config.toml"
+        config.write_text(
+            CONFIG_TEMPLATE.format(spool=spool, nas=nas, rclone=FAKE_RCLONE, cap_gb=20),
+            encoding="utf-8",
+        )
+        assert main(["-c", str(config), "ingest"]) == 1
+        assert not (spool / "ledger.db").exists()
 
 
 def test_version(capsys: pytest.CaptureFixture[str]) -> None:

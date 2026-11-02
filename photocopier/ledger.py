@@ -19,7 +19,7 @@ from pathlib import Path
 from .errors import LedgerError
 from .rclone import RemoteItem
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 
 class State(StrEnum):
@@ -62,6 +62,20 @@ CREATE TABLE IF NOT EXISTS meta (
   key   TEXT PRIMARY KEY,
   value TEXT NOT NULL
 );
+
+-- One row per ingest, process, flush or resolve invocation, for the status metrics.
+-- finished_at stays NULL for a run that was killed before it could report.
+CREATE TABLE IF NOT EXISTS runs (
+  id          INTEGER PRIMARY KEY,
+  command     TEXT NOT NULL,
+  scheduled   INTEGER NOT NULL,
+  dry_run     INTEGER NOT NULL,
+  started_at  TEXT NOT NULL,
+  finished_at TEXT,
+  exit_code   INTEGER
+);
+
+CREATE INDEX IF NOT EXISTS runs_started_idx ON runs (started_at);
 """
 
 
@@ -76,6 +90,38 @@ class Item:
     spool_path: str | None
     dest_path: str | None = None
     triage_reason: str | None = None
+
+
+@dataclass(frozen=True)
+class Run:
+    command: str
+    scheduled: bool
+    dry_run: bool
+    started_at: datetime
+    finished_at: datetime | None
+    exit_code: int | None
+
+    @property
+    def ok(self) -> bool:
+        return self.finished_at is not None and self.exit_code == 0
+
+
+@dataclass(frozen=True)
+class Outcomes:
+    """Where every item has got to, for the success metrics."""
+
+    delivered: int
+    delivered_unassisted: int
+    awaiting_review: int
+    discarded: int
+    processed: int
+    ever_triaged: int
+    oldest_undelivered: datetime | None
+
+    @property
+    def finished(self) -> int:
+        """Items that left the pipeline, or are waiting on a person to decide."""
+        return self.delivered + self.awaiting_review + self.discarded
 
 
 def _now() -> str:
@@ -110,8 +156,11 @@ class Ledger:
         self._conn.execute("PRAGMA foreign_keys=ON")
         self._conn.executescript(SCHEMA)
         self._conn.execute(
+            # Every schema change so far only adds tables, which the CREATE IF NOT
+            # EXISTS above has already done for an older ledger; record that it has.
             "INSERT INTO meta (key, value) VALUES ('schema_version', ?) "
-            "ON CONFLICT(key) DO NOTHING",
+            "ON CONFLICT(key) DO UPDATE SET value = excluded.value "
+            "WHERE CAST(value AS INTEGER) < CAST(excluded.value AS INTEGER)",
             (str(SCHEMA_VERSION),),
         )
         self._conn.commit()
@@ -198,7 +247,77 @@ class Ledger:
         ).fetchone()
         return int(row["total"])
 
+    def outcomes(self) -> Outcomes:
+        """triage_reason survives resolve (D11), so it marks every item a person touched."""
+        row = self.conn.execute(
+            """
+            SELECT
+              SUM(state = :delivered) AS delivered,
+              SUM(state = :delivered AND triage_reason IS NULL) AS unassisted,
+              SUM(state = :triaged) AS awaiting,
+              SUM(state = :discarded) AS discarded,
+              SUM(processed_at IS NOT NULL OR triage_reason IS NOT NULL) AS processed,
+              SUM(triage_reason IS NOT NULL) AS ever_triaged,
+              MIN(CASE WHEN state IN (:ingested, :processed_state) THEN ingested_at END)
+                AS oldest
+            FROM items
+            """,
+            {
+                "delivered": State.DELIVERED.value,
+                "triaged": State.TRIAGED.value,
+                "discarded": State.DISCARDED.value,
+                "ingested": State.INGESTED.value,
+                "processed_state": State.PROCESSED.value,
+            },
+        ).fetchone()
+        return Outcomes(
+            delivered=row["delivered"] or 0,
+            delivered_unassisted=row["unassisted"] or 0,
+            awaiting_review=row["awaiting"] or 0,
+            discarded=row["discarded"] or 0,
+            processed=row["processed"] or 0,
+            ever_triaged=row["ever_triaged"] or 0,
+            oldest_undelivered=_parse_time(row["oldest"]),
+        )
+
+    def runs(self, since: datetime | None = None) -> list[Run]:
+        sql = "SELECT * FROM runs"
+        params: list[object] = []
+        if since is not None:
+            sql += " WHERE started_at >= ?"
+            params.append(since.astimezone(UTC).isoformat(timespec="seconds"))
+        sql += " ORDER BY started_at, id"
+        return [
+            Run(
+                command=row["command"],
+                scheduled=bool(row["scheduled"]),
+                dry_run=bool(row["dry_run"]),
+                started_at=datetime.fromisoformat(row["started_at"]),
+                finished_at=_parse_time(row["finished_at"]),
+                exit_code=row["exit_code"],
+            )
+            for row in self.conn.execute(sql, params)
+        ]
+
     # -- mutations -------------------------------------------------------
+
+    def start_run(
+        self, command: str, *, scheduled: bool, dry_run: bool, started_at: datetime | None = None
+    ) -> int:
+        when = (started_at or datetime.now(UTC)).astimezone(UTC).isoformat(timespec="seconds")
+        with self.transaction() as conn:
+            cursor = conn.execute(
+                "INSERT INTO runs (command, scheduled, dry_run, started_at) VALUES (?, ?, ?, ?)",
+                (command, int(scheduled), int(dry_run), when),
+            )
+            return int(cursor.lastrowid or 0)
+
+    def finish_run(self, run_id: int, exit_code: int) -> None:
+        with self.transaction() as conn:
+            conn.execute(
+                "UPDATE runs SET finished_at = ?, exit_code = ? WHERE id = ?",
+                (_now(), exit_code, run_id),
+            )
 
     def record_ingested(self, source_id: str, item: RemoteItem, spool_path: Path) -> int:
         """Record a file that is confirmed present in the spool.
@@ -372,6 +491,10 @@ class Ledger:
                 "DELETE FROM items WHERE source_id = ? AND src_path = ? AND src_hash = ?",
                 (source_id, src_path, src_hash),
             )
+
+
+def _parse_time(value: str | None) -> datetime | None:
+    return datetime.fromisoformat(value) if value else None
 
 
 def _row_to_item(row: sqlite3.Row) -> Item:

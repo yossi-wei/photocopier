@@ -332,7 +332,7 @@ Each phase is independently verifiable before the next exists.
 | 1 | Ledger + `ingest`, `--dry-run` first | Enumerates both sources, respects cutoff, downloads nothing twice | ✅ |
 | 2 | `process` — dates, layout, naming, triage | `outbox/` is a byte-exact replica of intended NAS layout | ✅ |
 | 3 | `flush` — guards, verified move, conflict policy | Delivers to NAS; survives an unmounted share | ✅ |
-| 4 | launchd scheduling, full `status` metrics, initial backfill | Runs unattended for a week | |
+| 4 | launchd scheduling, full `status` metrics, initial backfill | Runs unattended for a week | ✅ |
 | 5 | NAS port — destination adapter, drop stage 3 | Same code, local destination | |
 
 ### Phase 1 as built
@@ -388,6 +388,23 @@ tests/                  including fake_rclone/ stub
 manual-intervention rate, triage rate, delivery completeness, and the unattended-run
 streak. The metrics in the PRD and the ones the tool reports are the same metrics — this
 is deliberate, and it is what keeps §5 of the PRD from being decorative.
+
+As built (`metrics.py`):
+
+- **Item outcomes** come from `items`. `triage_reason` survives `resolve` (D11), so it
+  marks every item a person had to touch: *delivered without intervention* is delivered
+  with no triage reason, over everything delivered, discarded, or awaiting review.
+- **Runs** come from a `runs` table (schema v2, added in place). `ingest`, `process`,
+  `flush` and `resolve` each write a row, started before the command and finished after,
+  so a run killed by the launcher's timeout stays unfinished and counts as failed. The
+  launcher exports `PHOTOCOPIER_SCHEDULED=1`; anything else is a manual run.
+- **Manual minutes** are not measurable, so they are counted as interventions: manual,
+  non-dry-run commands in the last 30 days.
+- **Spool drain** is reported as the age of the oldest undelivered file.
+- **Lost or overwritten** is checked only by `status --verify`, which stats every
+  delivered file on the NAS (about a minute for 4,000 files over SMB), behind the same
+  mount guard as flush. *Misfiled* cannot be checked by a machine and is not claimed.
+- **The unattended streak** is defined in D13.
 
 ---
 

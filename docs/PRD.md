@@ -74,6 +74,10 @@ instrumented, not aspirational.
 | Spool drain after travel | n/a | 1 flush run |
 | Longest unattended streak | 0 days | tracked, growing |
 
+Two are reported through proxies, because the thing itself is not measurable: manual
+minutes as manual interventions in the last 30 days, and spool drain as the age of the
+oldest undelivered file.
+
 The fourth is not a target, it is an invariant. It is enforced by the conflict policy
 (D5), atomic writes, and the read-only source constraint (N4), and it is the metric that
 would cause the tool to be turned off if violated once.

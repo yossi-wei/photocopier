@@ -4,11 +4,11 @@ Moves photos and video from OneDrive camera uploads into a NAS library organized
 `photos/YYYY/MM/` and `video/YYYY/` — automatically, daily, and correctly even when the
 NAS has been unreachable for three weeks.
 
-> **Status: phases 0–3 complete, phase 4 in progress — the pipeline works end to end on real
-> data.** Photos and video go from OneDrive to the NAS, filed by capture date, verified on
-> arrival. The initial backfill is done and it now runs four times a day under launchd; the
-> exit test (a week unattended) and the `status` success metrics are still to come. 236 tests
-> pass on macOS and Linux. After that: the port to run on the NAS itself.
+> **Status: phases 0–4 complete — it runs unattended on real data.** Photos and video go
+> from OneDrive to the NAS, filed by capture date, verified on arrival. It has run four
+> times a day under launchd since 2026-10-17 without a missed day or a human stepping in,
+> and `status` reports the success metrics below from the ledger. 317 tests pass on macOS
+> and Linux. Next: the port to run on the NAS itself.
 
 ---
 
@@ -70,6 +70,8 @@ The [full decision log](docs/decisions.md) includes the reversals, which are the
 ## Success metrics
 
 Computed from the ledger by `photocopier status` — instrumented, not aspirational.
+`status --verify` also checks that every delivered file is still on the NAS at the size it
+arrived.
 
 | Metric | Baseline | Target |
 |---|---|---|
@@ -79,6 +81,9 @@ Computed from the ledger by `photocopier status` — instrumented, not aspiratio
 | **Files lost, overwritten, or misfiled** | — | **0 — invariant** |
 | Longest unattended streak | 0 days | tracked |
 
+On the real library (2026-11-01): 4,157 of 4,158 files delivered without intervention, 1
+needed triage, and `--verify` found all 4,158 on the NAS.
+
 ## Roadmap
 
 | Phase | Deliverable | State |
@@ -87,7 +92,7 @@ Computed from the ledger by `photocopier status` — instrumented, not aspiratio
 | 1 | Ledger + `ingest` | ✅ |
 | 2 | `process` — dates, layout, naming, triage | ✅ |
 | 3 | `flush` — guards, verified delivery | ✅ |
-| 4 | Scheduling ✅, initial backfill ✅, full `status` metrics ☐ — exit test: a week unattended | 🚧 |
+| 4 | Scheduling, initial backfill, `status` metrics — exit test: a week unattended | ✅ |
 | 5 | Port to run on the NAS directly | ☐ |
 
 ## Running unattended (macOS launchd)
@@ -122,7 +127,8 @@ photocopier ingest --since 2025-07-01 --until 2025-08-01   # one-off window, e.g
 photocopier process             # file them into the outbox replica
 photocopier flush               # deliver to the NAS, verified, and reclaim the spool
 photocopier validate PATH       # check date rules against an already-filed library
-photocopier status              # spool usage, ledger state, triage counts
+photocopier status              # spool usage, ledger state, success metrics
+photocopier status --verify     # ...and check every delivered file is still on the NAS
 photocopier triage              # list files waiting for a decision, with ids and reasons
 photocopier resolve ID --filed-at PATH | --discard   # close one out (D11)
 ```

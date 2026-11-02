@@ -305,3 +305,34 @@ outside it, the same rule as the cutoff (D1's objection to `--max-age`).
 need no window: they act on whatever ingest put in the spool. A file whose EXIF date
 disagrees with its filename can still be filed outside the window's months.
 
+---
+
+## D13 — The unattended streak counts days the job repaired itself
+
+**Context.** Phase 4's exit test is "runs unattended for a week", and the PRD tracks the
+longest unattended streak. The launcher logs from 2026-10-17 to 2026-11-01 show 60
+scheduled passes and five failures, all `rclone lsjson` errors listing OneDrive (exit 1
+four times, exit 5 once). Every one was followed by a clean pass, at most six hours later,
+with nobody involved.
+
+**Options.**
+1. A day counts only if every scheduled pass that day succeeded.
+2. A day counts if each step the job attempted that day succeeded at least once.
+
+**Decision.** Option 2. Under option 1 the longest streak in those logs is four days, for
+a job that never once needed a person. The streak exists to make one failure visible: a
+job that has quietly stopped. A transient error that the next pass repairs is not that,
+and counting it would train the reader to ignore the number.
+
+**What still breaks it.** A day with no scheduled run at all, which is the silent stop
+itself. A step that fails every time it is tried that day. A run killed by the launcher's
+timeout, which is left unfinished in the `runs` table. A flush that was never attempted
+because the NAS was away does not break it: that is the travel case working (D2).
+
+**Visibility.** Transient failures are not hidden: `status` also reports the number of
+failed scheduled steps in the last 30 days, and the launcher still emails each one.
+
+**Consequence.** The streak is computed from the `runs` table, which starts empty, so the
+first two weeks are evidenced by the launcher logs rather than by `status`. Under this
+definition those logs show 16 consecutive days.
+

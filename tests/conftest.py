@@ -7,6 +7,7 @@ import pytest
 
 from photocopier import config as config_module
 from photocopier.ledger import Ledger
+from photocopier.metrics import ENV_SCHEDULED
 from photocopier.rclone import Rclone
 from photocopier.spool import Spool
 
@@ -17,7 +18,12 @@ FIXTURES = Path(__file__).parent / "fixtures"
 @pytest.fixture(autouse=True)
 def clean_env(monkeypatch: pytest.MonkeyPatch) -> None:
     """Never let the developer's own environment leak into a test."""
-    for name in (config_module.ENV_SPOOL, config_module.ENV_CONFIG, "FAKE_RCLONE_FAIL_ON"):
+    for name in (
+        config_module.ENV_SPOOL,
+        config_module.ENV_CONFIG,
+        ENV_SCHEDULED,
+        "FAKE_RCLONE_FAIL_ON",
+    ):
         monkeypatch.delenv(name, raising=False)
 
 

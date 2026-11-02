@@ -11,8 +11,10 @@ Every stage that changes anything takes `--dry-run`.
 from __future__ import annotations
 
 import argparse
+import os
+import sqlite3
 import sys
-from datetime import date
+from datetime import UTC, date, datetime
 
 from . import __version__
 from . import config as config_module
@@ -28,6 +30,8 @@ from .guards import (
 )
 from .ingest import ingest, render
 from .ledger import Ledger, State
+from .metrics import ENV_SCHEDULED, RECORDED_COMMANDS, compute, verify_delivered
+from .metrics import render as render_metrics
 from .process import process
 from .process import render as render_process
 from .progress import Progress
@@ -112,7 +116,14 @@ def build_parser() -> argparse.ArgumentParser:
         "--limit", type=int, default=0, metavar="N", help="stop after N files"
     )
 
-    sub.add_parser("status", help="show spool and ledger state")
+    status_parser = sub.add_parser(
+        "status", help="show spool and ledger state, and the success metrics"
+    )
+    status_parser.add_argument(
+        "--verify",
+        action="store_true",
+        help="also check every delivered file is still on the NAS (read-only)",
+    )
 
     sub.add_parser("triage", help="list triaged files awaiting a decision")
 
@@ -143,6 +154,13 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     if args.command == "ingest" and args.since and args.until and args.since >= args.until:
         parser.error("--since must be earlier than --until")
+    record = RunRecord(args)
+    code = dispatch(parser, args)
+    record.finish(code)
+    return code
+
+
+def dispatch(parser: argparse.ArgumentParser, args: argparse.Namespace) -> int:
     try:
         if args.command == "doctor":
             return cmd_doctor(args)
@@ -168,6 +186,57 @@ def main(argv: list[str] | None = None) -> int:
         return 130
     parser.error(f"unknown command {args.command!r}")
     return 2
+
+
+class RunRecord:
+    """The runs-table row behind the status metrics. It never fails the command itself.
+
+    A row is started before the command runs, so one killed by the launcher's timeout is
+    left unfinished and counts as a failure. The ledger is never created here: the
+    command's own guards (a spool inside a sync root, say) must run first.
+    """
+
+    def __init__(self, args: argparse.Namespace):
+        self.ledger_path = None
+        self.run_id: int | None = None
+        if args.command not in RECORDED_COMMANDS:
+            return
+        self.command = args.command
+        self.scheduled = os.environ.get(ENV_SCHEDULED) == "1"
+        self.dry_run = bool(args.dry_run)
+        self.started_at = datetime.now(UTC)
+        try:
+            cfg = config_module.load(args.config)
+        except PhotocopierError:
+            return  # the command reports it
+        self.ledger_path = Spool.from_config(cfg.spool).ledger_path
+        if self.ledger_path.exists():
+            self.run_id = self._write(self._start)
+
+    def finish(self, code: int) -> None:
+        if self.ledger_path is None or not self.ledger_path.exists():
+            return
+        if self.run_id is None:
+            self.run_id = self._write(self._start)
+        if self.run_id is not None:
+            run_id = self.run_id
+            self._write(lambda ledger: ledger.finish_run(run_id, code))
+
+    def _start(self, ledger: Ledger) -> int:
+        return ledger.start_run(
+            self.command,
+            scheduled=self.scheduled,
+            dry_run=self.dry_run,
+            started_at=self.started_at,
+        )
+
+    def _write(self, action):
+        try:
+            with Ledger(self.ledger_path) as ledger:
+                return action(ledger)
+        except (PhotocopierError, sqlite3.Error) as exc:
+            print(f"warning: could not record this run: {exc}", file=sys.stderr)
+            return None
 
 
 # -- commands ------------------------------------------------------------
@@ -348,7 +417,12 @@ def cmd_status(args: argparse.Namespace) -> int:
         staged = ledger.count_in_state(State.PROCESSED)
         if staged:
             print(f"{staged} file(s) staged in the outbox awaiting delivery")
-    return 0
+
+        verified = verify_delivered(cfg, ledger) if args.verify else None
+        print()
+        print("\n".join(render_metrics(compute(ledger), verified)))
+
+    return 1 if verified is not None and not verified.ok else 0
 
 
 def cmd_triage(args: argparse.Namespace) -> int:
