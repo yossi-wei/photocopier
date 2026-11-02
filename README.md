@@ -118,6 +118,7 @@ will wait for a click.
 photocopier doctor              # check environment and configuration
 photocopier ingest --dry-run    # report what would come down
 photocopier ingest              # fetch new files into the spool
+photocopier ingest --since 2025-07-01 --until 2025-08-01   # one-off window, e.g. a missed month (D12)
 photocopier process             # file them into the outbox replica
 photocopier flush               # deliver to the NAS, verified, and reclaim the spool
 photocopier validate PATH       # check date rules against an already-filed library

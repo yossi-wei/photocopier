@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import shutil
+from datetime import date
 from pathlib import Path
 
 import pytest
@@ -173,6 +174,80 @@ class TestCutoff:
 
         assert result.total_ingested == 1
         assert result.sources[0].skipped_cutoff == 0
+
+
+
+class TestWindow:
+    """`--since` / `--until`: one run narrowed to a date range, to fill a missed month."""
+
+    @pytest.fixture
+    def windowed(self, spool_root: Path, remote_root: Path):
+        config = make_config(
+            spool_root,
+            sources=[
+                {"id": "phone-1", "path": CAMERA_ROLL, "suffix": "phone-1", "cutoff": "2026-01-01"}
+            ],
+        )
+        populate(
+            remote_root / CAMERA_ROLL,
+            {
+                "2025/06/PXL_20250630_120000.jpg": 100,
+                "2025/07/PXL_20250701_120000.jpg": 100,
+                "2025/07/PXL_20250731_235959.mp4": 100,
+                "2025/08/PXL_20250801_000000.jpg": 100,
+                "2026/02/PXL_20260201_120000.jpg": 100,
+                "1969/1J1A3188.jpg": 100,
+            },
+        )
+        spool = Spool.from_config(config.spool)
+        spool.ensure()
+        return config, spool
+
+    def run_window(self, config, spool: Spool, **window):
+        rclone = Rclone(config.rclone)
+        with Ledger(spool.ledger_path) as ledger:
+            return ingest(config, rclone, ledger, spool, **window)
+
+    def test_one_month_before_the_cutoff(self, windowed) -> None:
+        config, spool = windowed
+        result = self.run_window(config, spool, since=date(2025, 7, 1), until=date(2025, 8, 1))
+
+        assert spool_files(spool) == {
+            "phone-1/2025/07/PXL_20250701_120000.jpg",
+            "phone-1/2025/07/PXL_20250731_235959.mp4",
+            "phone-1/1969/1J1A3188.jpg",
+        }
+        assert result.sources[0].skipped_cutoff == 1
+        assert result.sources[0].skipped_until == 2
+
+    def test_since_replaces_the_cutoff_only_for_that_run(self, windowed) -> None:
+        config, spool = windowed
+        self.run_window(config, spool, since=date(2025, 7, 1), until=date(2025, 8, 1))
+
+        later = self.run_window(config, spool)
+        assert [item.name for item in later.sources[0].ingested] == ["PXL_20260201_120000.jpg"]
+
+    def test_skipped_items_are_not_recorded(self, windowed) -> None:
+        """Outside the window is "not this run", never "done": a wider run still fetches it."""
+        config, spool = windowed
+        self.run_window(config, spool, since=date(2025, 7, 1), until=date(2025, 8, 1))
+
+        wider = self.run_window(config, spool, since=date(2025, 6, 1))
+        assert {item.name for item in wider.sources[0].ingested} == {
+            "PXL_20250630_120000.jpg",
+            "PXL_20250801_000000.jpg",
+            "PXL_20260201_120000.jpg",
+        }
+
+    def test_until_alone_keeps_the_cutoff(self, windowed) -> None:
+        config, spool = windowed
+        result = self.run_window(config, spool, until=date(2026, 3, 1))
+
+        assert {item.name for item in result.sources[0].ingested} == {
+            "PXL_20260201_120000.jpg",
+            "1J1A3188.jpg",
+        }
+        assert result.sources[0].skipped_cutoff == 4
 
 
 class TestJunk:

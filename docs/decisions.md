@@ -283,3 +283,25 @@ keeping both means filing the triaged copy under another name and pointing at th
 row never points at a deleted file; at worst a stray copy is left in triage. Nothing is
 appended to the manifest: it stays a record of why things were triaged, and the ledger
 row (which keeps `triage_reason`) is the record of how they were closed.
+
+---
+
+## D12 — A one-run date window on ingest, not an edited cutoff
+
+**Context.** A month from before the cutoff (July 2025) turned out never to have been
+filed by hand. The cutoff is only a lower bound, so lowering it to 2025-07-01 would also
+pull August–December 2025, which were filed by hand, and the scheduled job would read the
+edited config too.
+
+**Decision.** `ingest --since DATE --until DATE`. `--since` replaces each source's cutoff
+for that run only; `--until` is exclusive. Both use the same coarse date as the cutoff
+(filename, then source path). Items outside the window are skipped and **not recorded**,
+so the window never marks anything done: a later or wider run still sees them.
+
+**Undated files still come down.** The window skips only what it can confidently date
+outside it, the same rule as the cutoff (D1's objection to `--max-age`).
+
+**Consequence.** The config and the scheduled job are untouched. `process` and `flush`
+need no window: they act on whatever ingest put in the spool. A file whose EXIF date
+disagrees with its filename can still be filed outside the window's months.
+

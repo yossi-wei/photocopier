@@ -152,6 +152,33 @@ class TestIngestCommand:
         assert main(["-c", str(config_file), "ingest", "--source", "nobody"]) == 1
         assert "unknown source" in capsys.readouterr().err
 
+    def test_window_is_reported(
+        self, config_file: Path, loaded: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        args = ["-c", str(config_file), "ingest", "--dry-run"]
+        assert main([*args, "--since", "2026-06-01", "--until", "2026-06-02"]) == 0
+        out = capsys.readouterr().out
+
+        assert "window: 2026-06-01 to 2026-06-02" in out
+        assert "would ingest 1 file(s)" in out
+        assert "1 on or after 2026-06-02" in out
+
+    def test_bad_window_is_rejected(
+        self, config_file: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        with pytest.raises(SystemExit):
+            main(
+                ["-c", str(config_file), "ingest", "--since", "2025-08-01", "--until", "2025-07-01"]
+            )
+        assert "--since must be earlier" in capsys.readouterr().err
+
+    def test_bad_date_is_rejected(
+        self, config_file: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        with pytest.raises(SystemExit):
+            main(["-c", str(config_file), "ingest", "--until", "July"])
+        assert "not an ISO date" in capsys.readouterr().err
+
     def test_spool_inside_sync_root_is_refused(
         self, tmp_path: Path, loaded: Path, capsys: pytest.CaptureFixture[str]
     ) -> None:

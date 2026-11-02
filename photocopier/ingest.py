@@ -3,6 +3,10 @@
 Enumerate each configured source, ask the ledger which items are genuinely new, respect
 the cutoff and the spool cap, then copy an explicit file list into the spool.
 
+`--since` / `--until` narrow one run to a date window, for filling a gap by hand. Items
+outside the window are skipped without being recorded, so they stay available to any
+later run.
+
 Ordering matters: bytes land first, are verified, and only then are recorded. Recording
 before copying would mark a file done that was never fetched — silent data loss. The
 reverse ordering costs at most a re-download.
@@ -11,9 +15,10 @@ reverse ordering costs at most a re-download.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from datetime import date
 
 from .config import Config, SourceConfig
-from .dates import is_before_cutoff
+from .dates import is_before_cutoff, is_on_or_after
 from .guards import human_bytes
 from .ledger import Ledger
 from .rclone import Rclone, RemoteItem
@@ -28,6 +33,7 @@ class SourceResult:
     source_id: str
     seen: int = 0
     skipped_cutoff: int = 0
+    skipped_until: int = 0
     skipped_junk: int = 0
     already_known: int = 0
     selected: list[RemoteItem] = field(default_factory=list)
@@ -48,6 +54,8 @@ class SourceResult:
 class IngestResult:
     sources: list[SourceResult] = field(default_factory=list)
     dry_run: bool = False
+    since: date | None = None
+    until: date | None = None
 
     @property
     def total_selected(self) -> int:
@@ -104,8 +112,12 @@ def ingest_source(
     *,
     budget: int,
     dry_run: bool = False,
+    since: date | None = None,
+    until: date | None = None,
 ) -> SourceResult:
+    """`since` replaces the source's cutoff for this run; `until` is exclusive."""
     result = SourceResult(source_id=source.id)
+    lower = since if since is not None else source.cutoff
 
     listing = rclone.lsjson(source.path)
     result.seen = len(listing)
@@ -115,8 +127,11 @@ def ingest_source(
         if is_junk(item):
             result.skipped_junk += 1
             continue
-        if is_before_cutoff(item.path, item.name, source.cutoff):
+        if is_before_cutoff(item.path, item.name, lower):
             result.skipped_cutoff += 1
+            continue
+        if is_on_or_after(item.path, item.name, until):
+            result.skipped_until += 1
             continue
         candidates.append(item)
 
@@ -161,14 +176,24 @@ def ingest(
     *,
     only: str | None = None,
     dry_run: bool = False,
+    since: date | None = None,
+    until: date | None = None,
 ) -> IngestResult:
     sources = [config.source(only)] if only else list(config.sources)
-    result = IngestResult(dry_run=dry_run)
+    result = IngestResult(dry_run=dry_run, since=since, until=until)
 
     budget = spool.remaining_budget()
     for source in sources:
         source_result = ingest_source(
-            source, config, rclone, ledger, spool, budget=budget, dry_run=dry_run
+            source,
+            config,
+            rclone,
+            ledger,
+            spool,
+            budget=budget,
+            dry_run=dry_run,
+            since=since,
+            until=until,
         )
         result.sources.append(source_result)
         # Sources share one cap, so each consumes from the same running budget.
@@ -180,6 +205,13 @@ def ingest(
 def render(result: IngestResult, spool: Spool) -> str:
     lines: list[str] = []
     verb = "would ingest" if result.dry_run else "ingested"
+    lower = f"before {result.since}" if result.since else "before cutoff"
+
+    if result.since or result.until:
+        start = result.since or "cutoff"
+        end = result.until or "open"
+        lines.append(f"window: {start} to {end} (end exclusive); undated files still come down")
+        lines.append("")
 
     for source in result.sources:
         count = len(source.selected) if result.dry_run else len(source.ingested)
@@ -188,9 +220,11 @@ def render(result: IngestResult, spool: Spool) -> str:
         detail = [
             f"{source.seen} seen",
             f"{source.already_known} already in ledger",
-            f"{source.skipped_cutoff} before cutoff",
+            f"{source.skipped_cutoff} {lower}",
             f"{source.skipped_junk} junk",
         ]
+        if result.until:
+            detail.insert(3, f"{source.skipped_until} on or after {result.until}")
         lines.append(f"    ({', '.join(detail)})")
         if source.failed:
             lines.append(f"    {len(source.failed)} failed, will retry next run")

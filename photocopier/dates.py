@@ -143,3 +143,17 @@ def is_before_cutoff(path: str, filename: str, cutoff: date | None) -> bool:
     if resolved is None:
         return False
     return resolved < cutoff
+
+
+def is_on_or_after(path: str, filename: str, bound: date | None) -> bool:
+    """Whether an item can be *confidently* dated on or after `bound`.
+
+    The upper edge of an `ingest --until` window. Undatable files return False for the
+    same reason as in `is_before_cutoff`: they come down and reach triage.
+    """
+    if bound is None:
+        return False
+    resolved, _ = coarse_date(path, filename)
+    if resolved is None:
+        return False
+    return resolved >= bound

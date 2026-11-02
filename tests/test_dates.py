@@ -15,6 +15,7 @@ from photocopier.dates import (
     date_from_filename,
     date_from_path,
     is_before_cutoff,
+    is_on_or_after,
 )
 
 
@@ -119,3 +120,21 @@ class TestCutoff:
         must come down and reach triage, where a human decides.
         """
         assert not is_before_cutoff("1969/1J1A3188.jpg", "1J1A3188.jpg", date(2026, 1, 1))
+
+
+class TestUntil:
+    def test_no_bound_admits_everything(self) -> None:
+        assert not is_on_or_after(
+            "2030/01/PXL_20300101_120000.jpg", "PXL_20300101_120000.jpg", None
+        )
+
+    def test_bound_is_exclusive(self) -> None:
+        assert is_on_or_after(
+            "2025/08/PXL_20250801_000000.jpg", "PXL_20250801_000000.jpg", date(2025, 8, 1)
+        )
+        assert not is_on_or_after(
+            "2025/07/PXL_20250731_235959.jpg", "PXL_20250731_235959.jpg", date(2025, 8, 1)
+        )
+
+    def test_undatable_files_are_always_admitted(self) -> None:
+        assert not is_on_or_after("1969/1J1A3188.jpg", "1J1A3188.jpg", date(2025, 8, 1))

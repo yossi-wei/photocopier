@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import argparse
 import sys
+from datetime import date
 
 from . import __version__
 from . import config as config_module
@@ -38,6 +39,13 @@ from .validate import render as render_validate
 from .validate import validate
 
 
+def _iso_date(value: str) -> date:
+    try:
+        return date.fromisoformat(value)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError(f"{value!r} is not an ISO date (YYYY-MM-DD)") from exc
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="photocopier",
@@ -55,6 +63,18 @@ def build_parser() -> argparse.ArgumentParser:
         "--dry-run", action="store_true", help="report what would be ingested"
     )
     ingest_parser.add_argument("--source", metavar="ID", help="limit to one configured source")
+    ingest_parser.add_argument(
+        "--since",
+        type=_iso_date,
+        metavar="YYYY-MM-DD",
+        help="for this run, admit files dated on or after this, in place of each source's cutoff",
+    )
+    ingest_parser.add_argument(
+        "--until",
+        type=_iso_date,
+        metavar="YYYY-MM-DD",
+        help="for this run, skip files dated on or after this (exclusive)",
+    )
 
     process_parser = sub.add_parser(
         "process", help="file spooled files into the outbox replica of the NAS layout"
@@ -108,6 +128,8 @@ def build_parser() -> argparse.ArgumentParser:
 def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
+    if args.command == "ingest" and args.since and args.until and args.since >= args.until:
+        parser.error("--since must be earlier than --until")
     try:
         if args.command == "doctor":
             return cmd_doctor(args)
@@ -212,7 +234,16 @@ def cmd_ingest(args: argparse.Namespace) -> int:
 
     rclone = Rclone(cfg.rclone)
     with Ledger(spool.ledger_path) as ledger:
-        result = ingest(cfg, rclone, ledger, spool, only=args.source, dry_run=args.dry_run)
+        result = ingest(
+            cfg,
+            rclone,
+            ledger,
+            spool,
+            only=args.source,
+            dry_run=args.dry_run,
+            since=args.since,
+            until=args.until,
+        )
         print(render(result, spool))
 
     if result.total_failed:
