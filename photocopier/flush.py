@@ -25,6 +25,7 @@ from .config import Config
 from .guards import check_free_space, check_mount_live, human_bytes
 from .layout import PHOTOS, VIDEO, file_digest
 from .ledger import Item, Ledger, State
+from .progress import QUIET, Progress
 from .spool import Spool
 from .triage import DEST_CONFLICT, Triage
 
@@ -175,29 +176,37 @@ def flush_item(
     _prune_empty(spool.outbox, source.parent)
 
 
+def _staged_size(spool: Spool, item: Item) -> int:
+    if not item.dest_path:
+        return 0
+    source = spool.outbox / item.dest_path
+    return source.stat().st_size if source.is_file() else 0
+
+
 def flush(
     config: Config,
     ledger: Ledger,
     spool: Spool,
     *,
     dry_run: bool = False,
+    progress: Progress = QUIET,
 ) -> FlushResult:
     """Deliver everything staged. Guards run first and refuse rather than proceed."""
     check_mount_live(config.destination.mount_point, config.destination.mount_marker)
 
     pending = ledger.items_in_state(State.PROCESSED)
-    staged_bytes = sum(
-        (spool.outbox / i.dest_path).stat().st_size
-        for i in pending
-        if i.dest_path and (spool.outbox / i.dest_path).is_file()
-    )
+    sizes = [_staged_size(spool, item) for item in pending]
+    staged_bytes = sum(sizes)
     if staged_bytes:
         check_free_space(config.destination.mount_point, staged_bytes)
 
     result = FlushResult(dry_run=dry_run)
     triage = Triage(spool.triage)
-    for item in pending:
-        flush_item(item, config, spool, triage, ledger, result, dry_run=dry_run)
+    with progress.task("flush", items=len(pending), total_bytes=staged_bytes) as task:
+        for item, size in zip(pending, sizes, strict=True):
+            task.current(Path(item.dest_path or item.src_path).name)
+            flush_item(item, config, spool, triage, ledger, result, dry_run=dry_run)
+            task.advance(nbytes=size)
     return result
 
 

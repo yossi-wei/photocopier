@@ -127,6 +127,11 @@ photocopier triage              # list files waiting for a decision, with ids an
 photocopier resolve ID --filed-at PATH | --discard   # close one out (D11)
 ```
 
+Run by hand in a terminal, `ingest`, `process` and `flush` draw a one-line progress
+display on stderr (files, bytes, speed, time left) and clear it before printing their
+summary. It appears only when stderr is a terminal, so the scheduled job's logs and
+emails are unchanged; `--no-progress` turns it off.
+
 A run, with two phones configured:
 
 ```

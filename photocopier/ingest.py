@@ -16,16 +16,21 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from datetime import date
+from pathlib import Path
 
 from .config import Config, SourceConfig
 from .dates import is_before_cutoff, is_on_or_after
 from .guards import human_bytes
 from .ledger import Ledger
+from .progress import QUIET, Progress
 from .rclone import Rclone, RemoteItem
 from .spool import Spool
 
 # Filesystem detritus that is never worth transferring.
 IGNORED_NAMES = {".DS_Store", "Thumbs.db", "desktop.ini", "Icon\r", "Icon"}
+
+# rclone writes each file under this suffix and renames it when the transfer completes.
+RCLONE_PARTIAL_SUFFIX = ".partial"
 
 
 @dataclass
@@ -103,6 +108,19 @@ def select_within_budget(items: list[RemoteItem], budget: int) -> tuple[list[Rem
     return selected, False
 
 
+def landed_so_far(dest: Path) -> tuple[int, int]:
+    """Completed files and bytes so far under `dest`, partial transfers counted in bytes."""
+    files = nbytes = 0
+    if not dest.exists():
+        return 0, 0
+    for path in dest.rglob("*"):
+        if path.is_file():
+            nbytes += path.stat().st_size
+            if not path.name.endswith(RCLONE_PARTIAL_SUFFIX):
+                files += 1
+    return files, nbytes
+
+
 def ingest_source(
     source: SourceConfig,
     config: Config,
@@ -114,12 +132,14 @@ def ingest_source(
     dry_run: bool = False,
     since: date | None = None,
     until: date | None = None,
+    progress: Progress = QUIET,
 ) -> SourceResult:
     """`since` replaces the source's cutoff for this run; `until` is exclusive."""
     result = SourceResult(source_id=source.id)
     lower = since if since is not None else source.cutoff
 
-    listing = rclone.lsjson(source.path)
+    with progress.task(f"listing {source.id}"):
+        listing = rclone.lsjson(source.path)
     result.seen = len(listing)
 
     candidates: list[RemoteItem] = []
@@ -147,9 +167,23 @@ def ingest_source(
     dest = spool.source_incoming(source.id)
     rel_paths = [item.path for item in result.selected]
 
+    # The source's incoming folder may still hold files from an earlier, unprocessed
+    # ingest, so progress counts only what lands on top of them.
+    before_files, before_bytes = landed_so_far(dest)
+
+    def poll() -> tuple[int, int]:
+        files, nbytes = landed_so_far(dest)
+        return files - before_files, nbytes - before_bytes
+
     copy_error: str | None = None
     try:
-        rclone.copy_files(source.path, dest, rel_paths)
+        with progress.task(
+            f"ingest {source.id}",
+            items=len(result.selected),
+            total_bytes=result.selected_bytes,
+            poll=poll,
+        ):
+            rclone.copy_files(source.path, dest, rel_paths)
     except Exception as exc:  # noqa: BLE001 - recorded per item below
         # A partial transfer is normal here: whatever landed is still verified and
         # recorded, and the rest is retried on the next run.
@@ -178,6 +212,7 @@ def ingest(
     dry_run: bool = False,
     since: date | None = None,
     until: date | None = None,
+    progress: Progress = QUIET,
 ) -> IngestResult:
     sources = [config.source(only)] if only else list(config.sources)
     result = IngestResult(dry_run=dry_run, since=since, until=until)
@@ -194,6 +229,7 @@ def ingest(
             dry_run=dry_run,
             since=since,
             until=until,
+            progress=progress,
         )
         result.sources.append(source_result)
         # Sources share one cap, so each consumes from the same running budget.

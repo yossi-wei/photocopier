@@ -22,6 +22,7 @@ from .config import Config
 from .dates import resolve
 from .layout import Destination, destination_for, same_content
 from .ledger import Item, Ledger, State
+from .progress import QUIET, Progress
 from .spool import Spool
 from .triage import DEST_CONFLICT, NO_DATE, UNKNOWN_TYPE, Triage
 
@@ -168,12 +169,17 @@ def process(
     spool: Spool,
     *,
     dry_run: bool = False,
+    progress: Progress = QUIET,
 ) -> ProcessResult:
     result = ProcessResult(dry_run=dry_run)
     triage = Triage(spool.triage)
 
-    for item in ledger.items_in_state(State.INGESTED):
-        process_item(item, config, spool, triage, ledger, result, dry_run=dry_run)
+    pending = ledger.items_in_state(State.INGESTED)
+    with progress.task("process", items=len(pending)) as task:
+        for item in pending:
+            task.current(Path(item.src_path).name)
+            process_item(item, config, spool, triage, ledger, result, dry_run=dry_run)
+            task.advance()
 
     return result
 

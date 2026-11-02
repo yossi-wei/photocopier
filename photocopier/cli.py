@@ -30,6 +30,7 @@ from .ingest import ingest, render
 from .ledger import Ledger, State
 from .process import process
 from .process import render as render_process
+from .progress import Progress
 from .rclone import Rclone
 from .resolve import pending, render_pending, resolve_discard, resolve_filed
 from .resolve import render as render_resolve
@@ -56,9 +57,17 @@ def build_parser() -> argparse.ArgumentParser:
 
     sub = parser.add_subparsers(dest="command", required=True)
 
+    # Progress shows only on a terminal anyway; this is for when that guess is wrong.
+    watched = argparse.ArgumentParser(add_help=False)
+    watched.add_argument(
+        "--no-progress", action="store_true", help="do not draw a progress line"
+    )
+
     sub.add_parser("doctor", help="check the environment and configuration")
 
-    ingest_parser = sub.add_parser("ingest", help="download new files from OneDrive into the spool")
+    ingest_parser = sub.add_parser(
+        "ingest", parents=[watched], help="download new files from OneDrive into the spool"
+    )
     ingest_parser.add_argument(
         "--dry-run", action="store_true", help="report what would be ingested"
     )
@@ -77,14 +86,18 @@ def build_parser() -> argparse.ArgumentParser:
     )
 
     process_parser = sub.add_parser(
-        "process", help="file spooled files into the outbox replica of the NAS layout"
+        "process",
+        parents=[watched],
+        help="file spooled files into the outbox replica of the NAS layout",
     )
     process_parser.add_argument(
         "--dry-run", action="store_true", help="report what would be filed"
     )
 
     flush_parser = sub.add_parser(
-        "flush", help="deliver the staged outbox to the NAS and reclaim the spool"
+        "flush",
+        parents=[watched],
+        help="deliver the staged outbox to the NAS and reclaim the spool",
     )
     flush_parser.add_argument(
         "--dry-run", action="store_true", help="report what would be delivered"
@@ -158,6 +171,10 @@ def main(argv: list[str] | None = None) -> int:
 
 
 # -- commands ------------------------------------------------------------
+
+
+def _progress(args: argparse.Namespace) -> Progress:
+    return Progress(enabled=False) if args.no_progress else Progress()
 
 
 def cmd_doctor(args: argparse.Namespace) -> int:
@@ -243,6 +260,7 @@ def cmd_ingest(args: argparse.Namespace) -> int:
             dry_run=args.dry_run,
             since=args.since,
             until=args.until,
+            progress=_progress(args),
         )
         print(render(result, spool))
 
@@ -260,7 +278,7 @@ def cmd_process(args: argparse.Namespace) -> int:
     check_same_filesystem(spool.incoming, spool.outbox)
 
     with Ledger(spool.ledger_path) as ledger:
-        result = process(cfg, ledger, spool, dry_run=args.dry_run)
+        result = process(cfg, ledger, spool, dry_run=args.dry_run, progress=_progress(args))
         print(render_process(result))
 
     return 1 if result.missing else 0
@@ -277,7 +295,7 @@ def cmd_flush(args: argparse.Namespace) -> int:
         # The mount guard lives inside flush() so it also protects any other caller.
         # An unmounted share is fatal here, unlike in doctor: delivering into an empty
         # local directory would write the whole backlog to the boot disk.
-        result = flush(cfg, ledger, spool, dry_run=args.dry_run)
+        result = flush(cfg, ledger, spool, dry_run=args.dry_run, progress=_progress(args))
         print(render_flush(result))
 
     return 1 if (result.failed or result.missing) else 0

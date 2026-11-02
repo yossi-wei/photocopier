@@ -91,3 +91,31 @@ def populate(root: Path, spec: dict[str, int]) -> None:
     """Create files under root: {relative_path: size_in_bytes}."""
     for relative, size in spec.items():
         write_file(root / relative, os.urandom(size) if size else b"")
+
+
+@pytest.fixture
+def nas(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """A stand-in for the mounted share, with the marker file present.
+
+    os.path.ismount is patched because a temp directory is not a real mount point. The
+    guard's behaviour when that check *fails* is tested separately and unpatched — that
+    is the case that matters.
+    """
+    root = tmp_path / "nas"
+    (root / "photos").mkdir(parents=True)
+    (root / "video").mkdir(parents=True)
+    (root / ".photocopier-marker").touch()
+
+    real_ismount = os.path.ismount
+    monkeypatch.setattr(
+        os.path, "ismount", lambda p: True if Path(p) == root else real_ismount(p)
+    )
+    return root
+
+
+@pytest.fixture
+def wired(spool_root: Path, nas: Path, remote_root: Path):
+    config = make_config(spool_root, nas=nas)
+    spool = Spool.from_config(config.spool)
+    spool.ensure()
+    return config, spool, nas, remote_root
