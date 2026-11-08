@@ -10,7 +10,9 @@
 #   PHOTOCOPIER_BIN     the photocopier executable   ($HOME/.local/share/photocopier/venv/bin/photocopier)
 #   PHOTOCOPIER_SPOOL   spool directory, as in config ($HOME/.local/share/photocopier/spool)
 #   NAS_MOUNT           where the share is mounted   (/Volumes/media)
-#   NAS_URL             smb://host/share, enables one remount attempt and a reachability test ()
+#   NAS_URL             smb://host/share, enables mounting the share when it is not mounted ()
+#   NAS_MOUNT_TRIES     rounds of mount attempts before giving up for this pass (3)
+#   NAS_MOUNT_WAIT      seconds between rounds, for a network still coming up (15)
 #   STATE_DIR           state and logs               ($HOME/.local/state/photocopier)
 #   NAS_JOBS_LOCK       lock shared with other NAS jobs ($HOME/.local/state/nas-jobs/lock)
 #   NOTIFY_CMD          run as: $NOTIFY_CMD "<subject>" "<message>"; empty disables email ()
@@ -28,6 +30,8 @@ STATE_DIR="${STATE_DIR:-$HOME/.local/state/photocopier}"
 LOCK="${NAS_JOBS_LOCK:-$HOME/.local/state/nas-jobs/lock}"
 NOTIFY_CMD="${NOTIFY_CMD:-}"
 BACKLOG_WARN_DAYS="${BACKLOG_WARN_DAYS:-3}"
+NAS_MOUNT_TRIES="${NAS_MOUNT_TRIES:-3}"
+NAS_MOUNT_WAIT="${NAS_MOUNT_WAIT:-15}"
 DRY="${PHOTOCOPIER_DRY_RUN:-}"
 dry=(); [ "$DRY" = 1 ] && dry=(--dry-run)
 # Marks every step as scheduled in the ledger's runs table, for the unattended streak (D13).
@@ -58,14 +62,54 @@ fi
 have_lock=1; echo $$ > "$LOCK/pid"; echo photocopier > "$LOCK/job"
 
 # -- NAS availability ----------------------------------------------------------------
+# After a restart or a trip, a bare host name like `freenas` often has no cached address,
+# and mounting by it hangs until the timeout; its Bonjour name, `freenas.local`, resolves
+# at once. So each round tries NAS_URL and, for a bare host, the same URL with `.local`,
+# mounting only through a name that resolves. The network may still be coming up when
+# launchd runs a missed job at wake, hence more than one round. Away from home neither
+# name resolves, and a round costs seconds rather than a minute. Resolution goes through
+# the system resolver: a direct probe such as `nc` can be refused by macOS's Local Network
+# privacy even while the share mounts fine.
 is_mounted() { mount | grep -q " on $NAS_MOUNT (smbfs"; }
-if ! is_mounted && [ -n "$NAS_URL" ]; then
-  log "NAS not mounted; trying $NAS_URL"
-  with_timeout 60 osascript -e "mount volume \"$NAS_URL\"" >/dev/null 2>&1 || true
-  sleep 2
-fi
+url_host() { printf '%s' "$1" | sed -E 's#^[a-z]+://([^@/]*@)?([^/:]+).*#\2#'; }
+mount_urls() {
+  local host; host="$(url_host "$NAS_URL")"
+  printf '%s\n' "$NAS_URL"
+  case "$host" in
+    *.*) ;;
+    *) printf '%s\n' "$NAS_URL" | sed -E "s#^([a-z]+://([^@/]*@)?)$host#\1$host.local#" ;;
+  esac
+}
+resolves() { with_timeout 10 dscacheutil -q host -a name "$1" </dev/null 2>/dev/null | grep -q '^ip_address:'; }
+try_mount() {
+  local round url
+  for (( round = 1; round <= NAS_MOUNT_TRIES; round++ )); do
+    while IFS= read -r url; do
+      resolves "$(url_host "$url")" || continue
+      log "NAS not mounted; mounting $url (round $round of $NAS_MOUNT_TRIES)"
+      with_timeout 30 osascript -e "mount volume \"$url\"" </dev/null >/dev/null 2>&1 || true
+      sleep 2
+      is_mounted && { log "NAS mounted at $NAS_MOUNT"; return 0; }
+      [ -n "$(mounted_elsewhere)" ] && return 1  # retrying cannot fix that; the note says why
+    done < <(mount_urls)
+    [ "$round" -lt "$NAS_MOUNT_TRIES" ] && sleep "$NAS_MOUNT_WAIT"
+  done
+  log "NAS not reachable or would not mount after $NAS_MOUNT_TRIES round(s)"
+  return 1
+}
+# macOS mounts at media-1 when a leftover folder already sits at /Volumes/media.
+mounted_elsewhere() {
+  local share="${NAS_URL##*/}"
+  mount | sed -nE "s#^.*/$share on (/Volumes/$share-[0-9]+) \(smbfs.*#\1#p" | head -1
+}
+
+if ! is_mounted && [ -n "$NAS_URL" ]; then try_mount || true; fi
 nas_note=""
-is_mounted || nas_note="NAS not mounted at $NAS_MOUNT, so delivery was skipped. Files are safe in the spool and OneDrive."
+if ! is_mounted; then
+  nas_note="NAS not mounted at $NAS_MOUNT, so delivery was skipped. Files are safe in the spool and OneDrive."
+  elsewhere="$(mounted_elsewhere)"
+  [ -n "$elsewhere" ] && nas_note+=" The share is mounted at $elsewhere instead: a leftover folder at $NAS_MOUNT is probably in the way."
+fi
 
 # -- the pipeline --------------------------------------------------------------------
 failures=()

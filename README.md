@@ -101,8 +101,11 @@ needed triage, and `--verify` found all 4,158 on the NAS.
 scheduler needs it, and is configured only through environment variables (see its header):
 
 - takes a lock shared with other NAS jobs and skips the pass if another job holds it;
-- treats "NAS not mounted" as normal: ingest still runs and spools, delivery waits, and it
-  tries one remount if `NAS_URL` is set;
+- mounts the share first if `NAS_URL` is set and it is not mounted: up to three rounds, also
+  trying the Bonjour name (`host.local`) for a bare host name, which often fails to resolve
+  after a restart or a trip;
+- treats "NAS not mounted" as normal: ingest still runs and spools, delivery waits, and the
+  summary says so (and says when the share landed at `/Volumes/media-1` instead);
 - puts a time limit on every step;
 - emails (through `NOTIFY_CMD`) at most one failure message per 24 hours for the same
   failure, plus one summary the first time it runs on each calendar day (local time), which
