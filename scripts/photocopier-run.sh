@@ -137,7 +137,10 @@ fi
 status_out="$("$BIN" status 2>&1 || true)"
 oldest=""
 if command -v sqlite3 >/dev/null && [ -f "$SPOOL/ledger.db" ]; then
-  oldest="$(sqlite3 -readonly "$SPOOL/ledger.db" "select min(ingested_at) from items where state in ('ingested','processed');" 2>/dev/null || true)"
+  # Not -readonly: the ledger is in WAL mode, and a read-only connection cannot create the
+  # -shm file SQLite removes on the last close, so it fails to open at all. A SELECT
+  # writes nothing. Errors go to the log rather than silently disabling the warning.
+  oldest="$(sqlite3 -cmd '.timeout 5000' "$SPOOL/ledger.db" "select min(ingested_at) from items where state in ('ingested','processed');" 2>>"$run_log" || true)"
 fi
 warn=""
 if [ -n "$oldest" ]; then
@@ -164,7 +167,8 @@ compose() {
 }
 
 if [ -n "$summary_due" ]; then
-  subj="photocopier daily summary on $(hostname -s): ${problem:+needs attention}${problem:-OK}"
+  verdict="OK"; [ -n "$problem" ] && verdict="needs attention"
+  subj="photocopier daily summary on $(hostname -s): $verdict"
   if [ "$DRY" != 1 ] && [ -n "$NOTIFY_CMD" ]; then
     $NOTIFY_CMD "$subj" "$(compose)" && echo "$today" > "$STATE_DIR/summary-date"
   fi
