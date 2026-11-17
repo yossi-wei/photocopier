@@ -36,8 +36,16 @@ def spool_files(spool: Spool) -> set[str]:
     }
 
 
+def ingest_as_main_did(config, spool: Spool, source_id: str) -> None:
+    rclone = Rclone(config.rclone)
+    [item] = rclone.lsjson(CAMERA_ROLL)
+    flat = spool.incoming / source_id
+    rclone.copy_files(CAMERA_ROLL, flat, [item.path])
+    with Ledger(spool.ledger_path) as ledger:
+        ledger.record_ingested(source_id, item, flat / item.path)
+
+
 def scheduled_pass(config, spool: Spool) -> None:
-    """One launcher pass: ingest, process, flush."""
     run_ingest(config, spool)
     with Ledger(spool.ledger_path) as ledger:
         process(config, ledger, spool)
@@ -54,8 +62,7 @@ def files_under(root: Path) -> dict[str, bytes]:
     }
 
 
-def kept_somewhere(spool: Spool, nas: Path) -> set[bytes]:
-    """Every byte string that is in the library or waiting in triage for a person."""
+def in_library_or_triage(spool: Spool, nas: Path) -> set[bytes]:
     return set(files_under(nas).values()) | set(files_under(spool.triage).values())
 
 
@@ -462,11 +469,7 @@ class TestPartialTransfer:
 
 
 class TestReuploadAtSamePath:
-    """The same OneDrive path with new content is a new version, never a replacement (D6)."""
-
     def test_while_first_version_still_in_incoming_keeps_both(self, wired) -> None:
-        """Two ingests with no process between them (a crashed process step, or a
-        hand-run `ingest --since/--until` backfill before the next scheduled pass)."""
         config, spool, nas, remote = wired
         v1, v2 = b"A" * 3000, b"B" * 3500
         write_file(remote / CAMERA_ROLL / PHOTO, v1)
@@ -477,16 +480,14 @@ class TestReuploadAtSamePath:
         for _ in range(2):
             scheduled_pass(config, spool)
 
-        assert {v1, v2} <= kept_somewhere(spool, nas), (
-            f"v1 kept={v1 in kept_somewhere(spool, nas)}, "
-            f"v2 kept={v2 in kept_somewhere(spool, nas)}" + where(spool, nas)
+        assert {v1, v2} <= in_library_or_triage(spool, nas), (
+            f"v1 kept={v1 in in_library_or_triage(spool, nas)}, "
+            f"v2 kept={v2 in in_library_or_triage(spool, nas)}" + where(spool, nas)
         )
 
     def test_failed_refetch_over_a_stale_same_size_copy_is_not_recorded(
         self, wired, monkeypatch
     ) -> None:
-        """A failed copy must not be recorded because a stale file of the right size
-        sits where the new version would land."""
         config, spool, nas, remote = wired
         v1, v2 = b"A" * 3000, b"B" * 3000
         write_file(remote / CAMERA_ROLL / PHOTO, v1)
@@ -496,13 +497,29 @@ class TestReuploadAtSamePath:
         monkeypatch.setenv("FAKE_RCLONE_FAIL_ON", PHOTO)
         failed = run_ingest(config, spool)
         monkeypatch.delenv("FAKE_RCLONE_FAIL_ON")
+        assert (failed.total_ingested, failed.total_failed) == (0, 1)
         for _ in range(2):
             scheduled_pass(config, spool)
 
-        assert v2 in kept_somewhere(spool, nas), (
+        assert v2 in in_library_or_triage(spool, nas), (
             f"rclone copy failed, yet ingest recorded {failed.total_ingested} file(s) and "
             f"{failed.total_failed} failure(s); v2 never fetched" + where(spool, nas)
         )
+
+
+class TestUpgradeFromMain:
+    def test_version_ingested_by_main_still_delivers_beside_a_new_one(self, wired) -> None:
+        config, spool, nas, remote = wired
+        v1, v2 = b"A" * 3000, b"B" * 3000
+        write_file(remote / CAMERA_ROLL / PHOTO, v1)
+        ingest_as_main_did(config, spool, "phone-1")
+        write_file(remote / CAMERA_ROLL / PHOTO, v2)
+
+        scheduled_pass(config, spool)
+
+        assert files_under(nas) == {"photos/2026/06/PXL_20260615_101500_phone-1.jpg": v1}
+        assert v2 in in_library_or_triage(spool, nas)
+        assert files_under(spool.incoming) == {}
 
 
 class TestIdempotency:

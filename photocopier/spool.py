@@ -6,7 +6,10 @@ it never lives anywhere the OS considers disposable. See D7.
 
 from __future__ import annotations
 
+import hashlib
 import shutil
+from collections.abc import Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -40,6 +43,22 @@ class Spool:
 
     def source_incoming(self, source_id: str) -> Path:
         return self.incoming / source_id
+
+    @contextmanager
+    def fresh_landing(self, source_id: str) -> Iterator[Path]:
+        landing = self.root / "landing" / source_id
+        shutil.rmtree(landing, ignore_errors=True)
+        try:
+            yield landing
+        finally:
+            shutil.rmtree(landing, ignore_errors=True)
+
+    def unoccupied_incoming_path(self, source_id: str, src_path: str, src_hash: str) -> Path:
+        plain = self.source_incoming(source_id) / src_path
+        if not plain.exists():
+            return plain
+        version = hashlib.sha256(src_hash.encode()).hexdigest()[:16]
+        return self.source_incoming(source_id) / version / src_path
 
     def ensure(self) -> None:
         for path in (self.root, self.incoming, self.outbox, self.triage):

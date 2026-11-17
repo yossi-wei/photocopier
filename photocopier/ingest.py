@@ -164,40 +164,34 @@ def ingest_source(
     if dry_run or not result.selected:
         return result
 
-    dest = spool.source_incoming(source.id)
-    rel_paths = [item.path for item in result.selected]
+    with spool.fresh_landing(source.id) as landing:
+        rel_paths = [item.path for item in result.selected]
+        copy_error: str | None = None
+        try:
+            with progress.task(
+                f"ingest {source.id}",
+                items=len(result.selected),
+                total_bytes=result.selected_bytes,
+                poll=lambda: landed_so_far(landing),
+            ):
+                rclone.copy_files(source.path, landing, rel_paths)
+        except Exception as exc:  # noqa: BLE001 - recorded per item below
+            # A partial transfer is normal here: whatever landed is still verified and
+            # recorded, and the rest is retried on the next run.
+            copy_error = str(exc)
 
-    # The source's incoming folder may still hold files from an earlier, unprocessed
-    # ingest, so progress counts only what lands on top of them.
-    before_files, before_bytes = landed_so_far(dest)
-
-    def poll() -> tuple[int, int]:
-        files, nbytes = landed_so_far(dest)
-        return files - before_files, nbytes - before_bytes
-
-    copy_error: str | None = None
-    try:
-        with progress.task(
-            f"ingest {source.id}",
-            items=len(result.selected),
-            total_bytes=result.selected_bytes,
-            poll=poll,
-        ):
-            rclone.copy_files(source.path, dest, rel_paths)
-    except Exception as exc:  # noqa: BLE001 - recorded per item below
-        # A partial transfer is normal here: whatever landed is still verified and
-        # recorded, and the rest is retried on the next run.
-        copy_error = str(exc)
-
-    for item in result.selected:
-        landed = dest / item.path
-        if landed.is_file() and landed.stat().st_size == item.size:
-            ledger.record_ingested(source.id, item, landed)
-            result.ingested.append(item)
-        else:
-            reason = copy_error or "file missing or truncated after copy"
-            ledger.record_failure(source.id, item, reason)
-            result.failed.append((item, reason))
+        for item in result.selected:
+            landed = landing / item.path
+            if landed.is_file() and landed.stat().st_size == item.size:
+                kept = spool.unoccupied_incoming_path(source.id, item.path, item.hash)
+                kept.parent.mkdir(parents=True, exist_ok=True)
+                landed.rename(kept)
+                ledger.record_ingested(source.id, item, kept)
+                result.ingested.append(item)
+            else:
+                reason = copy_error or "file missing or truncated after copy"
+                ledger.record_failure(source.id, item, reason)
+                result.failed.append((item, reason))
 
     return result
 
