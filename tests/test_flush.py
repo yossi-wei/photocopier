@@ -18,10 +18,11 @@ from photocopier.ingest import ingest
 from photocopier.ledger import Ledger, State
 from photocopier.process import process
 from photocopier.rclone import Rclone
+from photocopier.resolve import pending
 from photocopier.spool import Spool
 from photocopier.triage import DEST_CONFLICT, Triage
 
-from .conftest import FIXTURES, make_config, populate
+from .conftest import FIXTURES, make_config, populate, write_file
 
 CAMERA_ROLL = "Camera Roll"
 
@@ -317,6 +318,131 @@ class TestNothingStaged:
 
         result = run_flush(config, spool)
         assert len(result.missing) == 1
+
+
+PHOTO = "2026/06/PXL_20260615_101500.jpg"
+STAGED = "photos/2026/06/PXL_20260615_101500_phone-1.jpg"
+
+
+class Killed(BaseException):
+    """Stands in for SIGKILL or a power cut: nothing in the app catches it."""
+
+
+def kill_on_call(monkeypatch: pytest.MonkeyPatch, owner, name: str, *, nth: int = 1) -> None:
+    """Make the nth call of owner.name die before it does anything; later calls run."""
+    original = getattr(owner, name)
+    calls = []
+
+    def dying(*args, **kwargs):
+        calls.append(name)
+        if len(calls) == nth:
+            raise Killed(name)
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(owner, name, dying)
+
+
+def scheduled_pass(config, spool: Spool):
+    pump(config, spool)
+    return run_flush(config, spool)
+
+
+def ledger_states(spool: Spool) -> list[str]:
+    with Ledger(spool.ledger_path) as ledger:
+        return [row["state"] for row in ledger.conn.execute("SELECT state FROM items ORDER BY id")]
+
+
+class TestKilledFlush:
+    def test_kill_after_spool_delete_before_ledger_converges(self, wired, monkeypatch) -> None:
+        """D11: the ledger is written before the spool copy is deleted."""
+        config, spool, nas, remote = wired
+        populate(remote / CAMERA_ROLL, {PHOTO: 4096})
+        pump(config, spool)
+
+        kill_on_call(monkeypatch, Ledger, "mark_delivered")
+        with pytest.raises(Killed):
+            run_flush(config, spool)
+        flushes = [scheduled_pass(config, spool) for _ in range(3)]
+
+        assert ledger_states(spool) == [State.DELIVERED]
+        assert [len(f.missing) for f in flushes] == [0, 0, 0]
+
+    def test_kill_after_copy_before_spool_delete_converges(self, wired, monkeypatch) -> None:
+        import photocopier.flush as flush_module
+
+        config, spool, nas, remote = wired
+        populate(remote / CAMERA_ROLL, {PHOTO: 4096})
+        original = (remote / CAMERA_ROLL / PHOTO).read_bytes()
+        pump(config, spool)
+
+        real_deliver = flush_module.deliver_file
+
+        def deliver_then_die(source, target):
+            real_deliver(source, target)
+            raise Killed("after deliver_file")
+
+        monkeypatch.setattr(flush_module, "deliver_file", deliver_then_die)
+        with pytest.raises(Killed):
+            run_flush(config, spool)
+        monkeypatch.setattr(flush_module, "deliver_file", real_deliver)
+
+        second = scheduled_pass(config, spool)
+
+        assert (nas / STAGED).read_bytes() == original
+        assert len(second.already_there) == 1 and not second.missing
+        assert ledger_states(spool) == [State.DELIVERED]
+        assert outbox_files(spool) == set()
+
+
+class TestIdenticalCopies:
+    """The same bytes at two OneDrive paths are staged once and carried by two rows."""
+
+    A = "2026/06/a/PXL_20260615_101500.jpg"
+    B = "2026/06/b/PXL_20260615_101500.jpg"
+
+    def upload_twice(self, remote: Path, content: bytes) -> None:
+        write_file(remote / CAMERA_ROLL / self.A, content)
+        write_file(remote / CAMERA_ROLL / self.B, content)
+
+    def test_identical_copies_at_two_paths_converge(self, wired) -> None:
+        config, spool, nas, remote = wired
+        self.upload_twice(remote, b"C" * 2500)
+
+        flushes = [scheduled_pass(config, spool) for _ in range(3)]
+
+        assert nas_files(nas) == {STAGED}
+        assert (nas / STAGED).read_bytes() == b"C" * 2500
+        assert ledger_states(spool) == [State.DELIVERED] * 2
+        assert [len(f.missing) for f in flushes] == [0, 0, 0]
+
+    def test_kill_between_the_two_ledger_writes_converges(self, wired, monkeypatch) -> None:
+        config, spool, nas, remote = wired
+        self.upload_twice(remote, b"C" * 2500)
+        pump(config, spool)
+
+        kill_on_call(monkeypatch, Ledger, "mark_delivered", nth=2)
+        with pytest.raises(Killed):
+            run_flush(config, spool)
+        last = scheduled_pass(config, spool)
+
+        assert ledger_states(spool) == [State.DELIVERED] * 2
+        assert not last.missing
+        assert outbox_files(spool) == set()
+
+    def test_both_go_to_triage_on_a_destination_conflict(self, wired) -> None:
+        config, spool, nas, remote = wired
+        self.upload_twice(remote, b"C" * 2500)
+        pump(config, spool)
+        write_file(nas / STAGED, b"a different photo filed by hand")
+
+        result = run_flush(config, spool)
+
+        assert (nas / STAGED).read_bytes() == b"a different photo filed by hand"
+        assert len(result.conflicts) == 2 and not result.missing
+        assert ledger_states(spool) == [State.TRIAGED] * 2
+        with Ledger(spool.ledger_path) as ledger:
+            listed = sorted(p.item.src_path for p in pending(ledger, Triage(spool.triage)))
+        assert listed == [self.A, self.B]
 
 
 def test_fixture_photo_survives_the_full_pipeline(wired) -> None:

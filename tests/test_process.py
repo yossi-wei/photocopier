@@ -14,6 +14,7 @@ from photocopier.spool import Spool
 from photocopier.triage import DEST_CONFLICT, NO_DATE, UNKNOWN_TYPE, Triage
 
 from .conftest import FIXTURES, make_config, populate
+from .test_flush import Killed, kill_on_call
 
 CAMERA_ROLL = "Camera Roll"
 
@@ -212,6 +213,24 @@ class TestConflicts:
 
         assert [reason for _i, reason in result.triaged] == [DEST_CONFLICT]
         assert staged.read_bytes() == original_bytes, "the staged file must not be overwritten"
+
+    def test_kill_while_dropping_a_duplicate_converges(
+        self, config, spool: Spool, remote_root: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """D11: the ledger is written before the spool copy is deleted."""
+        place(remote_root, "2026/11/PXL_20261101_021009424.jpg", "PXL_20261101_021009424.jpg")
+        run_ingest(config, spool)
+        run_process(config, spool)
+        place(remote_root, "2026/12/PXL_20261101_021009424.jpg", "PXL_20261101_021009424.jpg")
+        run_ingest(config, spool)
+
+        kill_on_call(monkeypatch, Ledger, "mark_processed")
+        with pytest.raises(Killed):
+            run_process(config, spool)
+        result = run_process(config, spool)
+
+        assert len(result.duplicates) == 1 and not result.missing
+        assert incoming_files(spool) == set()
 
 
 class TestIdempotency:
