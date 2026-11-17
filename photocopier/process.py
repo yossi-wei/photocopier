@@ -105,11 +105,11 @@ def process_item(
         if same_content(source, target):
             result.duplicates.append(item)
             if not dry_run:
-                source.unlink()
                 ledger.mark_processed(
                     item.id, spool_path=target, dest_path=str(destination.relative),
                     resolved_date=when.isoformat(), date_source=date_source,
                 )
+                source.unlink()
                 _prune_empty(spool.incoming, source.parent)
             return
         _triage(item, source, DEST_CONFLICT,

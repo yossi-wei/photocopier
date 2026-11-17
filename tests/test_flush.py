@@ -324,19 +324,18 @@ PHOTO = "2026/06/PXL_20260615_101500.jpg"
 STAGED = "photos/2026/06/PXL_20260615_101500_phone-1.jpg"
 
 
-class Killed(BaseException):
-    """Stands in for SIGKILL or a power cut: nothing in the app catches it."""
+class SimulatedSigkill(BaseException):
+    pass
 
 
 def kill_on_call(monkeypatch: pytest.MonkeyPatch, owner, name: str, *, nth: int = 1) -> None:
-    """Make the nth call of owner.name die before it does anything; later calls run."""
     original = getattr(owner, name)
     calls = []
 
     def dying(*args, **kwargs):
         calls.append(name)
         if len(calls) == nth:
-            raise Killed(name)
+            raise SimulatedSigkill(name)
         return original(*args, **kwargs)
 
     monkeypatch.setattr(owner, name, dying)
@@ -354,13 +353,12 @@ def ledger_states(spool: Spool) -> list[str]:
 
 class TestKilledFlush:
     def test_kill_after_spool_delete_before_ledger_converges(self, wired, monkeypatch) -> None:
-        """D11: the ledger is written before the spool copy is deleted."""
         config, spool, nas, remote = wired
         populate(remote / CAMERA_ROLL, {PHOTO: 4096})
         pump(config, spool)
 
         kill_on_call(monkeypatch, Ledger, "mark_delivered")
-        with pytest.raises(Killed):
+        with pytest.raises(SimulatedSigkill):
             run_flush(config, spool)
         flushes = [scheduled_pass(config, spool) for _ in range(3)]
 
@@ -379,10 +377,10 @@ class TestKilledFlush:
 
         def deliver_then_die(source, target):
             real_deliver(source, target)
-            raise Killed("after deliver_file")
+            raise SimulatedSigkill("after deliver_file")
 
         monkeypatch.setattr(flush_module, "deliver_file", deliver_then_die)
-        with pytest.raises(Killed):
+        with pytest.raises(SimulatedSigkill):
             run_flush(config, spool)
         monkeypatch.setattr(flush_module, "deliver_file", real_deliver)
 
@@ -395,8 +393,6 @@ class TestKilledFlush:
 
 
 class TestIdenticalCopies:
-    """The same bytes at two OneDrive paths are staged once and carried by two rows."""
-
     A = "2026/06/a/PXL_20260615_101500.jpg"
     B = "2026/06/b/PXL_20260615_101500.jpg"
 
@@ -421,7 +417,7 @@ class TestIdenticalCopies:
         pump(config, spool)
 
         kill_on_call(monkeypatch, Ledger, "mark_delivered", nth=2)
-        with pytest.raises(Killed):
+        with pytest.raises(SimulatedSigkill):
             run_flush(config, spool)
         last = scheduled_pass(config, spool)
 
