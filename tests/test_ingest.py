@@ -8,14 +8,17 @@ from pathlib import Path
 
 import pytest
 
+from photocopier.flush import flush
 from photocopier.ingest import ingest, is_junk, select_within_budget
 from photocopier.ledger import Ledger, State
+from photocopier.process import process
 from photocopier.rclone import Rclone, RemoteItem
 from photocopier.spool import Spool
 
-from .conftest import make_config, populate
+from .conftest import make_config, populate, write_file
 
 CAMERA_ROLL = "Camera Roll"
+PHOTO = "2026/06/PXL_20260615_101500.jpg"
 
 
 def run_ingest(config, spool: Spool, *, dry_run: bool = False, only: str | None = None):
@@ -31,6 +34,45 @@ def spool_files(spool: Spool) -> set[str]:
         for path in incoming.rglob("*")
         if path.is_file()
     }
+
+
+def scheduled_pass(config, spool: Spool) -> None:
+    """One launcher pass: ingest, process, flush."""
+    run_ingest(config, spool)
+    with Ledger(spool.ledger_path) as ledger:
+        process(config, ledger, spool)
+        flush(config, ledger, spool)
+
+
+def files_under(root: Path) -> dict[str, bytes]:
+    if not root.exists():
+        return {}
+    return {
+        str(p.relative_to(root)): p.read_bytes()
+        for p in root.rglob("*")
+        if p.is_file() and p.name not in {".photocopier-marker", "manifest.jsonl"}
+    }
+
+
+def kept_somewhere(spool: Spool, nas: Path) -> set[bytes]:
+    """Every byte string that is in the library or waiting in triage for a person."""
+    return set(files_under(nas).values()) | set(files_under(spool.triage).values())
+
+
+def where(spool: Spool, nas: Path) -> str:
+    with Ledger(spool.ledger_path) as ledger:
+        rows = [
+            tuple(row)
+            for row in ledger.conn.execute(
+                "SELECT id, state, src_path, dest_path, spool_path FROM items ORDER BY id"
+            )
+        ]
+    return (
+        f"\n  ledger: {rows}"
+        f"\n  nas:    {sorted(files_under(nas))}"
+        f"\n  triage: {sorted(files_under(spool.triage))}"
+        f"\n  incoming: {sorted(files_under(spool.incoming))}"
+    )
 
 
 @pytest.fixture
@@ -417,6 +459,50 @@ class TestPartialTransfer:
         monkeypatch.setenv("FAKE_RCLONE_FAIL_ON", "2026/06/PXL_20260601_112702768.jpg")
         result = run_ingest(config, spool)
         assert result.total_failed > 0
+
+
+class TestReuploadAtSamePath:
+    """The same OneDrive path with new content is a new version, never a replacement (D6)."""
+
+    def test_while_first_version_still_in_incoming_keeps_both(self, wired) -> None:
+        """Two ingests with no process between them (a crashed process step, or a
+        hand-run `ingest --since/--until` backfill before the next scheduled pass)."""
+        config, spool, nas, remote = wired
+        v1, v2 = b"A" * 3000, b"B" * 3500
+        write_file(remote / CAMERA_ROLL / PHOTO, v1)
+        run_ingest(config, spool)
+        write_file(remote / CAMERA_ROLL / PHOTO, v2)
+        run_ingest(config, spool)
+
+        for _ in range(2):
+            scheduled_pass(config, spool)
+
+        assert {v1, v2} <= kept_somewhere(spool, nas), (
+            f"v1 kept={v1 in kept_somewhere(spool, nas)}, "
+            f"v2 kept={v2 in kept_somewhere(spool, nas)}" + where(spool, nas)
+        )
+
+    def test_failed_refetch_over_a_stale_same_size_copy_is_not_recorded(
+        self, wired, monkeypatch
+    ) -> None:
+        """A failed copy must not be recorded because a stale file of the right size
+        sits where the new version would land."""
+        config, spool, nas, remote = wired
+        v1, v2 = b"A" * 3000, b"B" * 3000
+        write_file(remote / CAMERA_ROLL / PHOTO, v1)
+        run_ingest(config, spool)
+        write_file(remote / CAMERA_ROLL / PHOTO, v2)
+
+        monkeypatch.setenv("FAKE_RCLONE_FAIL_ON", PHOTO)
+        failed = run_ingest(config, spool)
+        monkeypatch.delenv("FAKE_RCLONE_FAIL_ON")
+        for _ in range(2):
+            scheduled_pass(config, spool)
+
+        assert v2 in kept_somewhere(spool, nas), (
+            f"rclone copy failed, yet ingest recorded {failed.total_ingested} file(s) and "
+            f"{failed.total_failed} failure(s); v2 never fetched" + where(spool, nas)
+        )
 
 
 class TestIdempotency:
