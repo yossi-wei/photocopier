@@ -250,6 +250,23 @@ commit message.
 
 ---
 
+**Addendum, 2026-11-17: Pixel and epoch-ms names are UTC instants.** The rule above
+covers EXIF and names already in local time. It does not cover two name forms that record
+a UTC instant: `PXL_YYYYMMDD_HHMMSSmmm` and 13-digit epoch milliseconds. Both are now
+converted to the machine's local zone before the date is taken. The zone is read at
+runtime, never hard-coded. Every other filename pattern is still taken as written.
+
+Measured on the same 3720 EXIF-dated Pixel photos, from a read-only copy of the live
+ledger:
+
+| Rule | Month agrees |
+|---|---|
+| Name read as UTC | 3714 of 3720 |
+| Name converted to local time | **3720 of 3720** |
+
+**Consequence.** The NAS port must set `TZ` to the library owner's zone. Without it, the
+NAS reads UTC and misfiles the six Pixel photos that the table counts as disagreeing.
+
 ## D11 — Triage is closed out by a command, never by editing the ledger
 
 **Context.** Triage had no way out except filing by hand and then an `UPDATE` in SQLite.

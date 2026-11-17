@@ -143,10 +143,10 @@ class TestUntil:
 
     def test_bound_is_exclusive(self) -> None:
         assert is_on_or_after(
-            "2025/08/PXL_20250801_000000.jpg", "PXL_20250801_000000.jpg", date(2025, 8, 1)
+            "2025/08/IMG_20250801_000000.jpg", "IMG_20250801_000000.jpg", date(2025, 8, 1)
         )
         assert not is_on_or_after(
-            "2025/07/PXL_20250731_235959.jpg", "PXL_20250731_235959.jpg", date(2025, 8, 1)
+            "2025/07/IMG_20250731_235959.jpg", "IMG_20250731_235959.jpg", date(2025, 8, 1)
         )
 
     def test_undatable_files_are_always_admitted(self) -> None:
