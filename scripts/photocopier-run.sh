@@ -17,7 +17,7 @@
 #   NAS_JOBS_LOCK       lock shared with other NAS jobs ($HOME/.local/state/nas-jobs/lock)
 #   NOTIFY_CMD          run as: $NOTIFY_CMD "<subject>" "<message>"; empty disables email ()
 #   BACKLOG_WARN_DAYS   warn in the summary when undelivered files are older than this (3)
-#   SOURCE_SILENT_DAYS  warn in the summary when a source has sent no new file for longer (7)
+#   SOURCE_SILENT_DAYS  warn in the summary when a source has sent nothing for more days (7)
 #   PHOTOCOPIER_DRY_RUN set to 1 to pass --dry-run to every step and send no email ()
 #
 # Always exits 0 unless it cannot start; problems are reported by email and in the log.
@@ -31,7 +31,7 @@ STATE_DIR="${STATE_DIR:-$HOME/.local/state/photocopier}"
 LOCK="${NAS_JOBS_LOCK:-$HOME/.local/state/nas-jobs/lock}"
 NOTIFY_CMD="${NOTIFY_CMD:-}"
 BACKLOG_WARN_DAYS="${BACKLOG_WARN_DAYS:-3}"
-SOURCE_SILENT_DAYS="${SOURCE_SILENT_DAYS:-7}"
+SOURCE_SILENT_DAYS="${SOURCE_SILENT_DAYS:-}"
 NAS_MOUNT_TRIES="${NAS_MOUNT_TRIES:-3}"
 NAS_MOUNT_WAIT="${NAS_MOUNT_WAIT:-15}"
 DRY="${PHOTOCOPIER_DRY_RUN:-}"
@@ -43,6 +43,12 @@ mkdir -p "$STATE_DIR" "$(dirname "$LOCK")"
 run_log="$STATE_DIR/run-$(date +%Y%m%d-%H%M%S).log"
 find "$STATE_DIR" -name 'run-*.log' -mtime +30 -delete 2>/dev/null || true
 log() { printf '%s %s\n' "$(date '+%H:%M:%S')" "$*" | tee -a "$run_log"; }
+silent_days=()
+if [[ "$SOURCE_SILENT_DAYS" =~ ^[1-9][0-9]*$ ]]; then
+  silent_days=(--silent-days "$SOURCE_SILENT_DAYS")
+elif [ -n "$SOURCE_SILENT_DAYS" ]; then
+  log "SOURCE_SILENT_DAYS=\"$SOURCE_SILENT_DAYS\" is not a whole number of days, 1 or more; using the default"
+fi
 
 [ -x "$BIN" ] || { echo "photocopier not found at $BIN" >&2; exit 127; }
 
@@ -142,29 +148,21 @@ else
 fi
 
 # -- reporting ------------------------------------------------------------------------
-status_out="$("$BIN" status 2>&1 || true)"
-oldest=""; quiet_by_source=""
+status_out="$("$BIN" status ${silent_days[@]+"${silent_days[@]}"} 2>&1)" ||
+  failures+=("status exited $?: $(printf '%s' "$status_out" | tail -2 | tr '\n' ' ')")
+oldest=""
 if command -v sqlite3 >/dev/null && [ -f "$SPOOL/ledger.db" ]; then
   # Not -readonly: the ledger is in WAL mode, and a read-only connection cannot create the
   # -shm file SQLite removes on the last close, so it fails to open at all. A SELECT
   # writes nothing. Errors go to the log rather than silently disabling the warning.
   oldest="$(sqlite3 -cmd '.timeout 5000' "$SPOOL/ledger.db" "select min(ingested_at) from items where state in ('ingested','processed');" 2>>"$run_log" || true)"
-  quiet_by_source="$(sqlite3 -cmd '.timeout 5000' "$SPOOL/ledger.db" "select source_id || '|' || (strftime('%s','now') - strftime('%s', max(ingested_at))) from items where ingested_at is not null group by source_id;" 2>>"$run_log" || true)"
 fi
 warn=""
 if [ -n "$oldest" ]; then
   age_days=$(( ( $(date +%s) - $(date -j -u -f '%Y-%m-%dT%H:%M:%S' "${oldest%%+*}" +%s 2>/dev/null || date +%s) ) / 86400 ))
   [ "$age_days" -ge "$BACKLOG_WARN_DAYS" ] && warn="WARNING: undelivered files have been waiting $age_days days."
 fi
-# Ingest time is the closest the ledger has to when a phone sent, so a source whose newest
-# ingest is older than SOURCE_SILENT_DAYS has gone quiet.
-silent_warn=""
-while IFS='|' read -r src quiet; do
-  [ -n "$src" ] && [ -n "$quiet" ] || continue
-  if [ "$quiet" -gt $(( SOURCE_SILENT_DAYS * 86400 )) ]; then
-    silent_warn+="WARNING: $src has sent nothing for $(( quiet / 86400 )) days."$'\n'
-  fi
-done <<< "$quiet_by_source"
+status_warn="$(printf '%s\n' "$status_out" | grep '^WARNING: ' || true)"
 triaged="$(printf '%s' "$status_out" | awk '/triaged/ {print $2; exit}')"
 
 today="$(date +%F)"
@@ -173,13 +171,13 @@ summary_due=""; [ "$(cat "$STATE_DIR/summary-date" 2>/dev/null || true)" != "$to
 problem=""
 [ ${#failures[@]} -gt 0 ] && problem=1
 [ -n "$warn" ] && problem=1
-[ -n "$silent_warn" ] && problem=1
+[ -n "$status_warn" ] && problem=1
 [ "${triaged:-0}" != 0 ] && problem=1
 
 compose() {
   [ ${#failures[@]} -gt 0 ] && { echo "FAILURES:"; printf ' - %s\n' "${failures[@]}"; echo; }
   [ -n "$warn" ] && { echo "$warn"; echo; }
-  [ -n "$silent_warn" ] && { printf '%s' "$silent_warn"; echo; }
+  [ -n "$status_warn" ] && { echo "$status_warn"; echo; }
   [ -n "$nas_note" ] && { echo "$nas_note"; echo; }
   echo "STATUS"; echo "$status_out"; echo
   echo "THIS RUN"; printf '%s' "$step_out"

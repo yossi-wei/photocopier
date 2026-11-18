@@ -30,7 +30,15 @@ from .guards import (
 )
 from .ingest import ingest, render
 from .ledger import Ledger, State
-from .metrics import ENV_SCHEDULED, RECORDED_COMMANDS, compute, verify_delivered
+from .metrics import (
+    ENV_SCHEDULED,
+    RECORDED_COMMANDS,
+    SILENT_DAYS,
+    compute,
+    silence_warnings,
+    source_activity,
+    verify_delivered,
+)
 from .metrics import render as render_metrics
 from .process import process
 from .process import render as render_process
@@ -49,6 +57,12 @@ def _iso_date(value: str) -> date:
         return date.fromisoformat(value)
     except ValueError as exc:
         raise argparse.ArgumentTypeError(f"{value!r} is not an ISO date (YYYY-MM-DD)") from exc
+
+
+def _days(value: str) -> int:
+    if not value.isdecimal() or int(value) < 1:
+        raise argparse.ArgumentTypeError(f"{value!r} is not a whole number of days, 1 or more")
+    return int(value)
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -123,6 +137,14 @@ def build_parser() -> argparse.ArgumentParser:
         "--verify",
         action="store_true",
         help="also check every delivered file is still on the NAS (read-only)",
+    )
+    status_parser.add_argument(
+        "--silent-days",
+        type=_days,
+        default=SILENT_DAYS,
+        metavar="N",
+        help=f"warn about a source that has sent nothing for more than N days "
+        f"(default {SILENT_DAYS})",
     )
 
     sub.add_parser("triage", help="list triaged files awaiting a decision")
@@ -420,7 +442,13 @@ def cmd_status(args: argparse.Namespace) -> int:
 
         verified = verify_delivered(cfg, ledger) if args.verify else None
         print()
-        print("\n".join(render_metrics(compute(ledger), verified)))
+        metrics = compute(ledger)
+        print("\n".join(render_metrics(metrics, verified)))
+
+        activity = source_activity(cfg, ledger)
+        if warnings := silence_warnings(activity, now=metrics.now, silent_days=args.silent_days):
+            print()
+            print("\n".join(warnings))
 
     return 1 if verified is not None and not verified.ok else 0
 
