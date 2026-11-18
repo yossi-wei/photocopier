@@ -183,6 +183,9 @@ class TestLauncherFailureReporting:
         )
 
 
+@pytest.mark.skipif(
+    sys.platform != "darwin", reason="the launcher runs caffeinate, which only macOS has"
+)
 class TestLauncherSilentSource:
     def test_source_with_no_new_files_for_days_is_not_reported_as_ok(
         self, scheduled: Pass, remote_root: Path
