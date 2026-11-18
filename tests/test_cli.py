@@ -8,7 +8,12 @@ is still a failed run.
 
 from __future__ import annotations
 
+import os
+import shlex
 import shutil
+import subprocess
+import sys
+from datetime import date
 from pathlib import Path
 
 import pytest
@@ -22,6 +27,10 @@ from photocopier.spool import Spool
 from .conftest import FAKE_RCLONE, FIXTURES, populate
 
 CAMERA_ROLL = "Camera Roll"
+PHONE_2 = "Pictures/Camera Roll"
+FAIL_LSJSON = "FAKE_RCLONE_FAIL_LSJSON"
+REPO = Path(__file__).resolve().parent.parent
+LAUNCHER = REPO / "scripts" / "photocopier-run.sh"
 
 CONFIG_TEMPLATE = """
 [spool]
@@ -389,3 +398,165 @@ class TestFlushCommand:
 
         assert main(["-c", str(config_file), "flush"]) == 0
         assert "nothing staged" in capsys.readouterr().out
+
+
+class TestIngestFailureReporting:
+    def test_failure_message_names_the_source_and_keeps_rclone_stderr(
+        self,
+        spool_root: Path,
+        remote_root: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        nas = tmp_path / "nas"
+        config_file = tmp_path / "config.toml"
+        config_file.write_text(
+            f"""
+[spool]
+path = "{spool_root}"
+cap_gb = 1
+
+[destination]
+photos_root = "{nas}/photos"
+video_root = "{nas}/video"
+mount_point = "{nas}"
+
+[rclone]
+remote = "onedrive"
+binary = "{FAKE_RCLONE}"
+transfers = 2
+
+[[source]]
+id = "phone-1"
+path = "{CAMERA_ROLL}"
+suffix = "phone-1"
+""",
+            encoding="utf-8",
+        )
+        monkeypatch.setenv(FAIL_LSJSON, CAMERA_ROLL)
+        populate(remote_root / CAMERA_ROLL, {"VID_20261116_093000.mp4": 100})
+
+        code = main(["-c", str(config_file), "ingest"])
+
+        err = capsys.readouterr().err
+        assert code == 1
+        assert "phone-1" in err, f"the message must say which source failed, got: {err!r}"
+        assert "simulated lsjson failure" in err, f"rclone stderr was dropped, got: {err!r}"
+
+
+class Pass:
+    """One scheduled pass of scripts/photocopier-run.sh inside a temp sandbox."""
+
+    def __init__(self, tmp_path: Path, remote_root: Path, spool_root: Path) -> None:
+        self.root = tmp_path
+        self.state = tmp_path / "state"
+        self.lock = tmp_path / "lock" / "lock"
+        self.nas = tmp_path / "nas"
+        self.notify_log = tmp_path / "notify.log"
+        self.remote_root = remote_root
+        self.cfg = tmp_path / "config.toml"
+        self.cfg.write_text(
+            f"""
+[spool]
+path = "{spool_root}"
+cap_gb = 1
+
+[destination]
+photos_root = "{self.nas}/photos"
+video_root = "{self.nas}/video"
+mount_point = "{self.nas}"
+
+[rclone]
+remote = "onedrive"
+binary = "{FAKE_RCLONE}"
+transfers = 2
+
+[[source]]
+id = "phone-1"
+path = "{CAMERA_ROLL}"
+suffix = "phone-1"
+
+[[source]]
+id = "phone-2"
+path = "{PHONE_2}"
+suffix = "phone-2"
+""",
+            encoding="utf-8",
+        )
+        self.spool = spool_root
+        self.bin = tmp_path / "photocopier"
+        self.bin.write_text(
+            "#!/bin/sh\n"
+            f"exec {shlex.quote(sys.executable)} -m photocopier"
+            f" -c {shlex.quote(str(self.cfg))} \"$@\"\n",
+            encoding="utf-8",
+        )
+        self.bin.chmod(0o755)
+        self.notify = tmp_path / "notify.sh"
+        self.notify.write_text(
+            "#!/bin/sh\n"
+            f'{{ echo "=== SUBJECT: $1"; echo "$2"; }} >> {shlex.quote(str(self.notify_log))}\n',
+            encoding="utf-8",
+        )
+        self.notify.chmod(0o755)
+
+    def env(self, extra: dict[str, str] | None = None) -> dict[str, str]:
+        env = {
+            "PATH": os.environ["PATH"],
+            "HOME": str(self.root),
+            "PYTHONPATH": str(REPO),
+            "FAKE_RCLONE_ROOT": str(self.remote_root),
+            "PHOTOCOPIER_BIN": str(self.bin),
+            "PHOTOCOPIER_CONFIG": str(self.cfg),
+            "PHOTOCOPIER_SPOOL": str(self.spool),
+            "NAS_MOUNT": str(self.nas),
+            "NAS_URL": "",
+            "STATE_DIR": str(self.state),
+            "NAS_JOBS_LOCK": str(self.lock),
+            "NOTIFY_CMD": str(self.notify),
+        }
+        env.update(extra or {})
+        return env
+
+    def run(self, extra: dict[str, str] | None = None) -> subprocess.CompletedProcess[str]:
+        return subprocess.run(
+            ["bash", str(LAUNCHER)],
+            env=self.env(extra),
+            capture_output=True,
+            text=True,
+            timeout=300,
+        )
+
+    def subjects(self) -> list[str]:
+        if not self.notify_log.exists():
+            return []
+        return [
+            line.removeprefix("=== SUBJECT: ")
+            for line in self.notify_log.read_text(encoding="utf-8").splitlines()
+            if line.startswith("=== SUBJECT: ")
+        ]
+
+    def bodies(self) -> str:
+        return self.notify_log.read_text(encoding="utf-8") if self.notify_log.exists() else ""
+
+    def set_summary_date(self, value: date) -> None:
+        self.state.mkdir(parents=True, exist_ok=True)
+        (self.state / "summary-date").write_text(value.isoformat() + "\n", encoding="utf-8")
+
+
+@pytest.fixture
+def scheduled(tmp_path: Path, remote_root: Path, spool_root: Path) -> Pass:
+    populate(remote_root / CAMERA_ROLL, {"VID_20261116_093000.mp4": 100})
+    populate(remote_root / PHONE_2, {"PXL_20261101_021009424.jpg": 100})
+    return Pass(tmp_path, remote_root, spool_root)
+
+
+class TestLauncherFailureEmail:
+    def test_failure_email_names_the_source_that_failed(self, scheduled: Pass) -> None:
+        scheduled.set_summary_date(date.today())
+        result = scheduled.run({FAIL_LSJSON: CAMERA_ROLL})
+        assert result.returncode == 0
+        subjects = scheduled.subjects()
+        assert any("failed" in s for s in subjects), f"no failure email was sent: {subjects}"
+        assert "phone-1" in scheduled.bodies(), "the failure email never says which source failed"

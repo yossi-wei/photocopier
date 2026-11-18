@@ -544,3 +544,34 @@ class TestEmptySource:
     def test_absent_folder_is_not_an_error(self, config, spool: Spool, remote_root: Path) -> None:
         result = run_ingest(config, spool)
         assert result.total_ingested == 0
+
+
+FAIL_LSJSON = "FAKE_RCLONE_FAIL_LSJSON"
+PHONE_2 = "Pictures/Camera Roll"
+
+
+@pytest.fixture
+def two_phones(spool_root: Path, remote_root: Path):
+    config = make_config(
+        spool_root,
+        sources=[
+            {"id": "phone-1", "path": CAMERA_ROLL, "suffix": "phone-1"},
+            {"id": "phone-2", "path": PHONE_2, "suffix": "phone-2"},
+        ],
+    )
+    populate(remote_root / CAMERA_ROLL, {"VID_20261116_093000.mp4": 100})
+    populate(remote_root / PHONE_2, {"PXL_20261101_021009424.jpg": 100})
+    spool = Spool.from_config(config.spool)
+    spool.ensure()
+    return config, spool
+
+
+class TestIngestListingFailure:
+    def test_one_failed_listing_does_not_stop_the_other_source(
+        self, two_phones, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        config, spool = two_phones
+        monkeypatch.setenv(FAIL_LSJSON, CAMERA_ROLL)
+        with Ledger(spool.ledger_path) as ledger:
+            result = ingest(config, Rclone(config.rclone), ledger, spool)
+        assert result.total_ingested == 1, "phone-2 has a new file and should still be ingested"
