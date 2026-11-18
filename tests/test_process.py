@@ -9,14 +9,22 @@ from pathlib import Path
 
 import pytest
 
-from photocopier.ledger import SCHEMA, Ledger, State
+from photocopier.ledger import SCHEMA, Item, Ledger, State
 from photocopier.process import process
 from photocopier.rclone import Rclone
 from photocopier.spool import Spool
 from photocopier.triage import DEST_CONFLICT, NO_DATE, UNKNOWN_TYPE, Triage
 
 from .conftest import FIXTURES, make_config, populate, write_file
-from .test_flush import PHOTO, STAGED, SimulatedSigkill, kill_on_call, nas_files, run_flush
+from .test_flush import (
+    PHOTO,
+    STAGED,
+    SimulatedSigkill,
+    kill_on_call,
+    nas_files,
+    pump,
+    run_flush,
+)
 
 CAMERA_ROLL = "Camera Roll"
 
@@ -380,6 +388,56 @@ class TestKilledProcess:
 
         assert not result.missing
         assert (nas / STAGED).read_bytes() == original
+
+
+class TestAnotherFileAtARecordedTarget:
+    """A killed move whose spool copy then vanishes outside photocopier, with a different
+    photo of the same size at the recorded target. Size is not identity: the row must
+    stay unresolved, never delivered with the other photo's bytes."""
+
+    def kill_the_first_move(self, config, spool: Spool, remote: Path, monkeypatch) -> Item:
+        write_file(remote / CAMERA_ROLL / PHOTO, b"A" * 4096)
+        run_ingest(config, spool)
+        with monkeypatch.context() as patch:
+            kill_on_call(patch, Path, "rename")
+            with pytest.raises(SimulatedSigkill):
+                run_process(config, spool)
+        with Ledger(spool.ledger_path) as ledger:
+            (item,) = ledger.items_in_state(State.INGESTED)
+        assert item.target_path and item.spool_path
+        Path(item.spool_path).unlink()
+        return item
+
+    def state_of(self, spool: Spool, item: Item) -> State:
+        with Ledger(spool.ledger_path) as ledger:
+            return ledger.get(item.id).state
+
+    def test_a_hand_copied_file_is_not_adopted(self, wired, monkeypatch) -> None:
+        config, spool, nas, remote = wired
+        item = self.kill_the_first_move(config, spool, remote, monkeypatch)
+        write_file(Path(str(item.target_path)), b"Y" * 4096)
+
+        pump(config, spool)
+        run_flush(config, spool)
+
+        assert self.state_of(spool, item) == State.INGESTED
+        assert not (nas / STAGED).exists()
+
+    def test_a_later_photo_for_the_same_destination_is_not_adopted(
+        self, wired, monkeypatch
+    ) -> None:
+        config, spool, nas, remote = wired
+        item = self.kill_the_first_move(config, spool, remote, monkeypatch)
+        write_file(remote / CAMERA_ROLL / "2026/06/A/PXL_20260615_101500.jpg", b"Y" * 4096)
+
+        pump(config, spool)
+        pump(config, spool)
+        run_flush(config, spool)
+
+        assert self.state_of(spool, item) == State.INGESTED
+        assert (nas / STAGED).read_bytes() == b"Y" * 4096
+        with Ledger(spool.ledger_path) as ledger:
+            assert ledger.count_in_state(State.DELIVERED) == 1
 
 
 class TestIdempotency:
