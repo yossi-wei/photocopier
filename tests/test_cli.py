@@ -28,7 +28,39 @@ from .conftest import FAKE_RCLONE, FIXTURES, populate
 
 CAMERA_ROLL = "Camera Roll"
 PHONE_2 = "Pictures/Camera Roll"
+PHONE_3 = "Pictures/Phone 3"
 FAIL_LSJSON = "FAKE_RCLONE_FAIL_LSJSON"
+
+
+def write_ingest_config(
+    tmp_path: Path, spool_root: Path, sources: list[tuple[str, str]], binary: Path = FAKE_RCLONE
+) -> Path:
+    """A config with one [[source]] per (id, path) pair, using `binary` as rclone."""
+    nas = tmp_path / "nas"
+    blocks = "".join(
+        f'\n[[source]]\nid = "{source_id}"\npath = "{path}"\nsuffix = "{source_id}"\n'
+        for source_id, path in sources
+    )
+    config_file = tmp_path / "config.toml"
+    config_file.write_text(
+        f"""
+[spool]
+path = "{spool_root}"
+cap_gb = 1
+
+[destination]
+photos_root = "{nas}/photos"
+video_root = "{nas}/video"
+mount_point = "{nas}"
+
+[rclone]
+remote = "onedrive"
+binary = "{binary}"
+transfers = 2
+{blocks}""",
+        encoding="utf-8",
+    )
+    return config_file
 REPO = Path(__file__).resolve().parent.parent
 LAUNCHER = REPO / "scripts" / "photocopier-run.sh"
 
@@ -444,6 +476,49 @@ suffix = "phone-1"
         assert "phone-1" in err, f"the message must say which source failed, got: {err!r}"
         assert "simulated lsjson failure" in err, f"rclone stderr was dropped, got: {err!r}"
 
+    def test_very_long_stderr_is_truncated_on_the_cli(
+        self,
+        spool_root: Path,
+        remote_root: Path,
+        tmp_path: Path,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        flood = tmp_path / "rclone-flood"
+        flood.write_text(
+            "#!/bin/sh\n"
+            "if [ \"$1\" = lsjson ]; then head -c 200000 /dev/zero | tr '\\0' E >&2; exit 1; fi\n"
+            f"exec {shlex.quote(str(FAKE_RCLONE))} \"$@\"\n",
+            encoding="utf-8",
+        )
+        flood.chmod(0o755)
+        config_file = write_ingest_config(
+            tmp_path, spool_root, [("phone-1", CAMERA_ROLL)], binary=flood
+        )
+        populate(remote_root / CAMERA_ROLL, {"VID_20261116_093000.mp4": 100})
+
+        assert main(["-c", str(config_file), "ingest"]) == 1
+        err = capsys.readouterr().err
+        assert len(err) <= 2000, f"stderr is {len(err)} chars"
+
+    def test_last_line_names_every_failed_source(
+        self,
+        spool_root: Path,
+        remote_root: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        config_file = write_ingest_config(
+            tmp_path, spool_root, [("phone-1", CAMERA_ROLL), ("phone-2", PHONE_2)]
+        )
+        monkeypatch.setenv(FAIL_LSJSON, f"{CAMERA_ROLL},{PHONE_2}")
+        populate(remote_root / CAMERA_ROLL, {"VID_20261116_093000.mp4": 100})
+        populate(remote_root / PHONE_2, {"PXL_20261101_021009424.jpg": 100})
+
+        assert main(["-c", str(config_file), "ingest"]) == 1
+        lines = capsys.readouterr().err.splitlines()
+        assert lines[-1] == "error: listing failed for phone-1, phone-2", f"got: {lines!r}"
+
 
 class LauncherSandbox:
     def __init__(self, tmp_path: Path, remote_root: Path, spool_root: Path) -> None:
@@ -568,3 +643,19 @@ class TestLauncherFailureEmail:
         subjects = scheduled.subjects()
         assert any("failed" in s for s in subjects), f"no failure email was sent: {subjects}"
         assert "phone-1" in scheduled.bodies(), "the failure email never says which source failed"
+
+    def test_failure_line_names_every_failed_source(self, scheduled: LauncherSandbox) -> None:
+        with scheduled.cfg.open("a", encoding="utf-8") as handle:
+            handle.write(
+                f'\n[[source]]\nid = "phone-3"\npath = "{PHONE_3}"\nsuffix = "phone-3"\n'
+            )
+        populate(scheduled.remote_root / PHONE_3, {"IMG_0001.jpg": 100})
+        scheduled.set_summary_date(date.today())
+        result = scheduled.run({FAIL_LSJSON: ",".join([CAMERA_ROLL, PHONE_2, PHONE_3])})
+        assert result.returncode == 0
+        bullet = next(
+            (line for line in scheduled.bodies().splitlines() if line.startswith(" - ingest")), ""
+        )
+        assert bullet, f"no FAILURES bullet for ingest in: {scheduled.bodies()!r}"
+        for source in ("phone-1", "phone-2", "phone-3"):
+            assert source in bullet, f"{source} missing from FAILURES bullet: {bullet!r}"

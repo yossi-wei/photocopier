@@ -8,6 +8,7 @@ from pathlib import Path
 
 import pytest
 
+from photocopier.errors import RcloneError
 from photocopier.flush import flush
 from photocopier.ingest import ingest, is_junk, select_within_budget
 from photocopier.ledger import Ledger, State
@@ -575,3 +576,12 @@ class TestIngestListingFailure:
         with Ledger(spool.ledger_path) as ledger:
             result = ingest(config, Rclone(config.rclone), ledger, spool)
         assert result.total_ingested == 1, "phone-2 has a new file and should still be ingested"
+
+
+class TestListingFailureMessage:
+    def test_very_long_stderr_is_truncated_in_report(self) -> None:
+        err = RcloneError(
+            "rclone lsjson failed with exit code 1", returncode=1, stderr="E" * 200_000
+        )
+        assert len(err.report()) <= 1000, f"report is {len(err.report())} chars"
+
