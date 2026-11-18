@@ -18,7 +18,7 @@ from photocopier.ingest import ingest
 from photocopier.ledger import Ledger, State
 from photocopier.process import process
 from photocopier.rclone import Rclone
-from photocopier.resolve import pending
+from photocopier.resolve import pending, resolve_filed
 from photocopier.spool import Spool
 from photocopier.triage import DEST_CONFLICT, Triage
 
@@ -328,15 +328,21 @@ class SimulatedSigkill(BaseException):
     pass
 
 
-def kill_on_call(monkeypatch: pytest.MonkeyPatch, owner, name: str, *, nth: int = 1) -> None:
+def kill_on_call(
+    monkeypatch: pytest.MonkeyPatch, owner, name: str, *, nth: int = 1, after: bool = False
+) -> None:
     original = getattr(owner, name)
     calls = []
 
     def dying(*args, **kwargs):
         calls.append(name)
-        if len(calls) == nth:
+        dies = len(calls) == nth
+        if dies and not after:
             raise SimulatedSigkill(name)
-        return original(*args, **kwargs)
+        result = original(*args, **kwargs)
+        if dies:
+            raise SimulatedSigkill(name)
+        return result
 
     monkeypatch.setattr(owner, name, dying)
 
@@ -352,7 +358,7 @@ def ledger_states(spool: Spool) -> list[str]:
 
 
 class TestKilledFlush:
-    def test_kill_after_spool_delete_before_ledger_converges(self, wired, monkeypatch) -> None:
+    def test_kill_before_the_ledger_write_converges(self, wired, monkeypatch) -> None:
         config, spool, nas, remote = wired
         populate(remote / CAMERA_ROLL, {PHOTO: 4096})
         pump(config, spool)
@@ -364,6 +370,42 @@ class TestKilledFlush:
 
         assert ledger_states(spool) == [State.DELIVERED]
         assert [len(f.missing) for f in flushes] == [0, 0, 0]
+
+    def test_kill_between_ledger_write_and_outbox_delete_converges(
+        self, wired, monkeypatch
+    ) -> None:
+        config, spool, nas, remote = wired
+        write_file(remote / CAMERA_ROLL / PHOTO, b"P" * 4096)
+        pump(config, spool)
+
+        kill_on_call(monkeypatch, Ledger, "mark_delivered", after=True)
+        with pytest.raises(SimulatedSigkill):
+            run_flush(config, spool)
+        flushes = [scheduled_pass(config, spool) for _ in range(2)]
+
+        assert (nas / STAGED).read_bytes() == b"P" * 4096
+        assert ledger_states(spool) == [State.DELIVERED]
+        assert outbox_files(spool) == set()
+        assert [len(f.already_there) for f in flushes] == [1, 0]
+
+    @pytest.mark.parametrize("nas_copy", [None, b"a different photo"])
+    def test_stray_outbox_copy_stays_unless_the_nas_holds_it(
+        self, wired, monkeypatch, nas_copy: bytes | None
+    ) -> None:
+        config, spool, nas, remote = wired
+        write_file(remote / CAMERA_ROLL / PHOTO, b"P" * 4096)
+        pump(config, spool)
+        kill_on_call(monkeypatch, Ledger, "mark_delivered", after=True)
+        with pytest.raises(SimulatedSigkill):
+            run_flush(config, spool)
+        if nas_copy is None:
+            (nas / STAGED).unlink()
+        else:
+            (nas / STAGED).write_bytes(nas_copy)
+
+        scheduled_pass(config, spool)
+
+        assert (spool.outbox / STAGED).read_bytes() == b"P" * 4096
 
     def test_kill_after_copy_before_spool_delete_converges(self, wired, monkeypatch) -> None:
         import photocopier.flush as flush_module
@@ -439,6 +481,25 @@ class TestIdenticalCopies:
         with Ledger(spool.ledger_path) as ledger:
             listed = sorted(p.item.src_path for p in pending(ledger, Triage(spool.triage)))
         assert listed == [self.A, self.B]
+
+
+    def test_each_triaged_copy_is_checked_on_resolve(self, wired) -> None:
+        config, spool, nas, remote = wired
+        self.upload_twice(remote, b"C" * 2500)
+        pump(config, spool)
+        write_file(nas / STAGED, b"a different photo filed by hand")
+        run_flush(config, spool)
+        same = write_file(nas / "photos/2026/06/by_hand_c.jpg", b"C" * 2500)
+        other = write_file(nas / "photos/2026/06/by_hand_d.jpg", b"D" * 2500)
+
+        with Ledger(spool.ledger_path) as ledger:
+            ids = {i.src_path: i.id for i in ledger.items_in_state(State.TRIAGED)}
+            resolve_filed(config, ledger, spool, ids[self.A], str(same))
+            with pytest.raises(GuardError):
+                resolve_filed(config, ledger, spool, ids[self.B], str(other))
+            resolve_filed(config, ledger, spool, ids[self.B], str(same))
+
+        assert ledger_states(spool) == [State.DELIVERED] * 2
 
 
 def test_fixture_photo_survives_the_full_pipeline(wired) -> None:

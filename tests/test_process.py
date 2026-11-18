@@ -14,7 +14,7 @@ from photocopier.spool import Spool
 from photocopier.triage import DEST_CONFLICT, NO_DATE, UNKNOWN_TYPE, Triage
 
 from .conftest import FIXTURES, make_config, populate
-from .test_flush import SimulatedSigkill, kill_on_call
+from .test_flush import SimulatedSigkill, kill_on_call, nas_files, run_flush
 
 CAMERA_ROLL = "Camera Roll"
 
@@ -230,6 +230,52 @@ class TestConflicts:
 
         assert len(result.duplicates) == 1 and not result.missing
         assert incoming_files(spool) == set()
+
+
+class TestStrayIncoming:
+    NAME = "PXL_20261101_021009424.jpg"
+
+    def kill_after_dropping_ledger_write(self, config, spool, remote_root, monkeypatch) -> None:
+        place(remote_root, f"2026/11/{self.NAME}", self.NAME)
+        run_ingest(config, spool)
+        run_process(config, spool)
+        place(remote_root, f"2026/12/{self.NAME}", self.NAME)
+        run_ingest(config, spool)
+        kill_on_call(monkeypatch, Ledger, "mark_processed", after=True)
+        with pytest.raises(SimulatedSigkill):
+            run_process(config, spool)
+
+    def test_kill_between_process_ledger_write_and_incoming_delete_converges(
+        self, config, spool: Spool, remote_root: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        self.kill_after_dropping_ledger_write(config, spool, remote_root, monkeypatch)
+
+        result = run_process(config, spool)
+
+        assert incoming_files(spool) == set()
+        assert len(result.duplicates) == 1
+        assert len(outbox_files(spool)) == 1
+
+    def test_stray_is_reclaimed_after_flush_delivered_it(
+        self, wired, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        config, spool, nas, remote = wired
+        self.kill_after_dropping_ledger_write(config, spool, remote, monkeypatch)
+        run_flush(config, spool)
+
+        run_process(config, spool)
+
+        assert incoming_files(spool) == set()
+        assert len(nas_files(nas)) == 1
+
+    def test_unrecorded_incoming_file_is_kept(self, config, spool: Spool) -> None:
+        orphan = spool.source_incoming("phone-1") / f"2026/11/{self.NAME}"
+        orphan.parent.mkdir(parents=True)
+        shutil.copy2(FIXTURES / self.NAME, orphan)
+
+        run_process(config, spool)
+
+        assert orphan.is_file()
 
 
 class TestIdempotency:
