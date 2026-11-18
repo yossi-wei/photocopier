@@ -1,7 +1,8 @@
-"""Failure reporting of the scheduled launcher, scripts/photocopier-run.sh.
+"""Reporting of the scheduled launcher, scripts/photocopier-run.sh.
 
 The email is the user's only signal from an unattended run, so a failed send must leave a
-trace in the run log and must not suppress the next attempt. Each test states what the user
+trace in the run log and must not suppress the next attempt, and a phone that has gone quiet
+must be named in the summary. Each test states what the user
 needs. Nothing here touches the real installation: every path lives under tmp_path, and HOME
 points there too.
 """
@@ -196,5 +197,18 @@ class TestLauncherSilentSource:
         last = scheduled.subjects()[-1]
         assert "OK" not in last, (
             "phone-2 has sent nothing for 16 days while phone-1 uploads, "
+            f"yet the summary says: {last}"
+        )
+
+    def test_source_quiet_for_less_than_the_limit_is_not_flagged(
+        self, scheduled: Pass
+    ) -> None:
+        scheduled.run()
+        backdate_source(scheduled.spool / "ledger.db", "phone-2", days=2)
+        scheduled.set_summary_date(date.today() - timedelta(days=1))
+        scheduled.run()
+        last = scheduled.subjects()[-1]
+        assert last.endswith("OK"), (
+            "phone-2 sent its last file 2 days ago, inside the 7 day limit, "
             f"yet the summary says: {last}"
         )
