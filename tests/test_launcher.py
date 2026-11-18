@@ -11,9 +11,11 @@ from __future__ import annotations
 import os
 import re
 import shlex
+import sqlite3
 import subprocess
 import sys
-from datetime import date
+from contextlib import closing
+from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 
 import pytest
@@ -144,6 +146,18 @@ def scheduled(tmp_path: Path, remote_root: Path, spool_root: Path) -> Pass:
     return Pass(tmp_path, remote_root, spool_root)
 
 
+def backdate_source(ledger_path: Path, source_id: str, days: int) -> None:
+    """Make a source look as it does after its phone stops uploading: every file delivered,
+    the newest ingested `days` ago. Delivered rows keep the undelivered backlog empty."""
+    when = (datetime.now(UTC) - timedelta(days=days)).isoformat(timespec="seconds")
+    with closing(sqlite3.connect(ledger_path)) as conn:
+        conn.execute(
+            "UPDATE items SET state = 'delivered', ingested_at = ? WHERE source_id = ?",
+            (when, source_id),
+        )
+        conn.commit()
+
+
 class TestLauncherFailureReporting:
     def test_failed_email_send_is_written_to_the_run_log(self, scheduled: Pass) -> None:
         scheduled.set_notify(ok=False)
@@ -165,4 +179,22 @@ class TestLauncherFailureReporting:
         assert not last_failure.exists(), (
             "the failure email never left, yet last-failure was written, so the next 24 hours "
             "of identical failures are suppressed"
+        )
+
+
+class TestLauncherSilentSource:
+    def test_source_with_no_new_files_for_days_is_not_reported_as_ok(
+        self, scheduled: Pass, remote_root: Path
+    ) -> None:
+        scheduled.run()
+        assert scheduled.subjects(), "the first pass of the day should send the summary"
+        backdate_source(scheduled.spool / "ledger.db", "phone-2", days=16)
+        scheduled.set_summary_date(date.today() - timedelta(days=1))
+        stamp = date.today().strftime("%Y%m%d")
+        populate(remote_root / CAMERA_ROLL, {f"VID_{stamp}_090000.mp4": 100})
+        scheduled.run()
+        last = scheduled.subjects()[-1]
+        assert "OK" not in last, (
+            "phone-2 has sent nothing for 16 days while phone-1 uploads, "
+            f"yet the summary says: {last}"
         )
