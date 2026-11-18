@@ -331,11 +331,17 @@ def cmd_ingest(args: argparse.Namespace) -> int:
             until=args.until,
             progress=_progress(args),
         )
-        print(render(result, spool))
+        # Flushed first so a supervisor that keeps stdout and stderr together, such as the
+        # launcher's failure email, sees the error lines last.
+        print(render(result, spool), flush=True)
+        for source in result.sources:
+            if source.listing_error:
+                print(
+                    f"error: {source.source_id}: listing failed: {source.listing_error}",
+                    file=sys.stderr,
+                )
 
-    if result.total_failed:
-        return 1
-    return 0
+    return 1 if result.any_failed else 0
 
 
 def cmd_process(args: argparse.Namespace) -> int:

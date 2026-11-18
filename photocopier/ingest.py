@@ -21,6 +21,7 @@ from pathlib import Path
 
 from .config import Config, SourceConfig
 from .dates import is_before_cutoff, is_on_or_after
+from .errors import RcloneError
 from .guards import human_bytes
 from .ledger import Ledger
 from .progress import QUIET, Progress
@@ -46,6 +47,7 @@ class SourceResult:
     ingested: list[RemoteItem] = field(default_factory=list)
     failed: list[tuple[RemoteItem, str]] = field(default_factory=list)
     capped: bool = False
+    listing_error: str | None = None
 
     @property
     def selected_bytes(self) -> int:
@@ -86,6 +88,10 @@ class IngestResult:
     @property
     def total_failed(self) -> int:
         return sum(len(s.failed) for s in self.sources)
+
+    @property
+    def any_failed(self) -> bool:
+        return any(s.listing_error or s.failed for s in self.sources)
 
 
 def is_junk(item: RemoteItem) -> bool:
@@ -224,18 +230,21 @@ def ingest(
 
     budget = spool.remaining_budget()
     for source in sources:
-        source_result = ingest_source(
-            source,
-            config,
-            rclone,
-            ledger,
-            spool,
-            budget=budget,
-            dry_run=dry_run,
-            since=since,
-            until=until,
-            progress=progress,
-        )
+        try:
+            source_result = ingest_source(
+                source,
+                config,
+                rclone,
+                ledger,
+                spool,
+                budget=budget,
+                dry_run=dry_run,
+                since=since,
+                until=until,
+                progress=progress,
+            )
+        except RcloneError as exc:
+            source_result = SourceResult(source_id=source.id, listing_error=exc.report())
         result.sources.append(source_result)
         # Sources share one cap, so each consumes from the same running budget.
         budget = max(0, budget - source_result.selected_bytes)
@@ -258,6 +267,9 @@ def render(result: IngestResult, spool: Spool) -> str:
         count = len(source.selected) if result.dry_run else len(source.ingested)
         size = source.selected_bytes if result.dry_run else source.ingested_bytes
         lines.append(f"{source.source_id}: {verb} {count} file(s), {human_bytes(size)}")
+        if source.listing_error:
+            lines.append("    listing failed, will retry next run")
+            continue
         detail = [
             f"{source.seen} seen",
             f"{source.already_known} already in ledger",

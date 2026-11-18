@@ -23,6 +23,10 @@ class RcloneError(PhotocopierError):
         self.returncode = returncode
         self.stderr = stderr
 
+    def report(self) -> str:
+        kept = [line.strip() for line in self.stderr.splitlines() if line.strip()]
+        return " | ".join([str(self), *kept[-2:]])
+
 
 class LedgerError(PhotocopierError):
     """The ledger is unreadable, or an illegal state transition was attempted."""

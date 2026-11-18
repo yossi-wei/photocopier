@@ -445,9 +445,7 @@ suffix = "phone-1"
         assert "simulated lsjson failure" in err, f"rclone stderr was dropped, got: {err!r}"
 
 
-class Pass:
-    """One scheduled pass of scripts/photocopier-run.sh inside a temp sandbox."""
-
+class LauncherSandbox:
     def __init__(self, tmp_path: Path, remote_root: Path, spool_root: Path) -> None:
         self.root = tmp_path
         self.state = tmp_path / "state"
@@ -546,14 +544,14 @@ suffix = "phone-2"
 
 
 @pytest.fixture
-def scheduled(tmp_path: Path, remote_root: Path, spool_root: Path) -> Pass:
+def scheduled(tmp_path: Path, remote_root: Path, spool_root: Path) -> LauncherSandbox:
     populate(remote_root / CAMERA_ROLL, {"VID_20261116_093000.mp4": 100})
     populate(remote_root / PHONE_2, {"PXL_20261101_021009424.jpg": 100})
-    return Pass(tmp_path, remote_root, spool_root)
+    return LauncherSandbox(tmp_path, remote_root, spool_root)
 
 
 class TestLauncherFailureEmail:
-    def test_failure_email_names_the_source_that_failed(self, scheduled: Pass) -> None:
+    def test_failure_email_names_the_source_that_failed(self, scheduled: LauncherSandbox) -> None:
         scheduled.set_summary_date(date.today())
         result = scheduled.run({FAIL_LSJSON: CAMERA_ROLL})
         assert result.returncode == 0
