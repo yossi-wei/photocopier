@@ -3,17 +3,19 @@
 from __future__ import annotations
 
 import shutil
+import sqlite3
+from contextlib import closing
 from pathlib import Path
 
 import pytest
 
-from photocopier.ledger import Ledger, State
+from photocopier.ledger import SCHEMA, Ledger, State
 from photocopier.process import process
 from photocopier.rclone import Rclone
 from photocopier.spool import Spool
 from photocopier.triage import DEST_CONFLICT, NO_DATE, UNKNOWN_TYPE, Triage
 
-from .conftest import FIXTURES, make_config, populate
+from .conftest import FIXTURES, make_config, populate, write_file
 from .test_flush import PHOTO, STAGED, SimulatedSigkill, kill_on_call, nas_files, run_flush
 
 CAMERA_ROLL = "Camera Roll"
@@ -297,6 +299,86 @@ class TestKilledProcess:
         passes = [self.scheduled_pass(config, spool) for _ in range(3)]
 
         assert [len(p.missing) for p in passes] == [0, 0, 0]
+        assert (nas / STAGED).read_bytes() == original
+
+    @pytest.mark.parametrize(
+        ("owner", "step"), [(Ledger, "record_target_and_rename"), (Path, "rename")]
+    )
+    def test_kill_before_the_rename_converges(self, wired, monkeypatch, owner, step) -> None:
+        config, spool, nas, remote = wired
+        populate(remote / CAMERA_ROLL, {PHOTO: 4096})
+        original = (remote / CAMERA_ROLL / PHOTO).read_bytes()
+        run_ingest(config, spool)
+
+        kill_on_call(monkeypatch, owner, step)
+        with pytest.raises(SimulatedSigkill):
+            run_process(config, spool)
+        result = self.scheduled_pass(config, spool)
+
+        assert len(result.filed) == 1 and not result.missing
+        assert (nas / STAGED).read_bytes() == original
+        assert not (spool.incoming / "phone-1").exists()
+
+    def test_kill_while_filing_a_copy_of_a_delivered_photo_converges(
+        self, wired, monkeypatch
+    ) -> None:
+        config, spool, nas, remote = wired
+        same = b"S" * 4096
+        write_file(remote / CAMERA_ROLL / "2026/06/a/PXL_20260615_101500.jpg", same)
+        self.scheduled_pass(config, spool)
+        write_file(remote / CAMERA_ROLL / "2026/06/b/PXL_20260615_101500.jpg", same)
+        run_ingest(config, spool)
+
+        kill_on_call(monkeypatch, Ledger, "mark_processed")
+        with pytest.raises(SimulatedSigkill):
+            run_process(config, spool)
+        run_flush(config, spool)
+        result = self.scheduled_pass(config, spool)
+
+        assert not result.missing
+        assert (nas / STAGED).read_bytes() == same
+        with Ledger(spool.ledger_path) as ledger:
+            assert ledger.count_in_state(State.DELIVERED) == 2
+
+    def test_dry_run_after_a_kill_reports_the_file_and_moves_nothing(
+        self, wired, monkeypatch
+    ) -> None:
+        config, spool, _nas, remote = wired
+        populate(remote / CAMERA_ROLL, {PHOTO: 4096})
+        run_ingest(config, spool)
+        kill_on_call(monkeypatch, Ledger, "mark_processed")
+        with pytest.raises(SimulatedSigkill):
+            run_process(config, spool)
+
+        result = run_process(config, spool, dry_run=True)
+
+        assert len(result.filed) == 1 and not result.missing
+        assert outbox_files(spool) == {STAGED}
+        with Ledger(spool.ledger_path) as ledger:
+            assert ledger.count_in_state(State.INGESTED) == 1
+
+    def test_ledger_from_an_older_build_is_upgraded_and_recovers(
+        self, wired, monkeypatch
+    ) -> None:
+        config, spool, nas, _remote = wired
+        original = b"P" * 4096
+        incoming = write_file(spool.incoming / "phone-1" / PHOTO, original)
+        with closing(sqlite3.connect(spool.ledger_path)) as conn:
+            conn.executescript(SCHEMA.replace("  target_path   TEXT,\n", ""))
+            assert "target_path" not in {r[1] for r in conn.execute("PRAGMA table_info(items)")}
+            conn.execute(
+                "INSERT INTO items (source_id, src_path, src_size, state, spool_path, "
+                "discovered_at, ingested_at) VALUES ('phone-1', ?, ?, 'ingested', ?, ?, ?)",
+                (PHOTO, len(original), str(incoming), "2026-11-01", "2026-11-01"),
+            )
+            conn.commit()
+
+        kill_on_call(monkeypatch, Ledger, "mark_processed")
+        with pytest.raises(SimulatedSigkill):
+            run_process(config, spool)
+        result = self.scheduled_pass(config, spool)
+
+        assert not result.missing
         assert (nas / STAGED).read_bytes() == original
 
 

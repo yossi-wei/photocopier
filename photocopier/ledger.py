@@ -52,6 +52,7 @@ CREATE TABLE IF NOT EXISTS items (
   delivered_at  TEXT,
   attempts      INTEGER NOT NULL DEFAULT 0,
   last_error    TEXT,
+  target_path   TEXT,
   UNIQUE (source_id, src_path, src_hash)
 );
 
@@ -90,6 +91,7 @@ class Item:
     spool_path: str | None
     dest_path: str | None = None
     triage_reason: str | None = None
+    target_path: str | None = None
 
 
 @dataclass(frozen=True)
@@ -155,9 +157,10 @@ class Ledger:
         self._conn.execute("PRAGMA journal_mode=WAL")
         self._conn.execute("PRAGMA foreign_keys=ON")
         self._conn.executescript(SCHEMA)
+        columns = {row["name"] for row in self._conn.execute("PRAGMA table_info(items)")}
+        if "target_path" not in columns:
+            self._conn.execute("ALTER TABLE items ADD COLUMN target_path TEXT")
         self._conn.execute(
-            # Every schema change so far only adds tables, which the CREATE IF NOT
-            # EXISTS above has already done for an older ledger; record that it has.
             "INSERT INTO meta (key, value) VALUES ('schema_version', ?) "
             "ON CONFLICT(key) DO UPDATE SET value = excluded.value "
             "WHERE CAST(value AS INTEGER) < CAST(excluded.value AS INTEGER)",
@@ -367,6 +370,14 @@ class Ledger:
                 ),
             )
 
+    def record_target_and_rename(self, item_id: int, source: Path, target: Path) -> None:
+        with self.transaction() as conn:
+            conn.execute(
+                "UPDATE items SET target_path = ? WHERE id = ?", (str(target), item_id)
+            )
+        target.parent.mkdir(parents=True, exist_ok=True)
+        source.rename(target)
+
     def mark_processed(
         self,
         item_id: int,
@@ -376,16 +387,12 @@ class Ledger:
         resolved_date: str,
         date_source: str,
     ) -> None:
-        """Record a file that is confirmed present at its outbox location.
-
-        Called after the rename, never before — same ordering rule as ingest. If this
-        write is lost, the file is simply reprocessed, which is idempotent.
-        """
+        """Record a file that is confirmed present at its outbox location."""
         with self.transaction() as conn:
             conn.execute(
                 """
                 UPDATE items SET
-                  state = ?, spool_path = ?, dest_path = ?,
+                  state = ?, spool_path = ?, target_path = NULL, dest_path = ?,
                   resolved_date = ?, date_source = ?, processed_at = ?,
                   triage_reason = NULL, last_error = NULL
                 WHERE id = ?
@@ -409,7 +416,7 @@ class Ledger:
             conn.execute(
                 """
                 UPDATE items SET
-                  state = ?, spool_path = ?, triage_reason = ?,
+                  state = ?, spool_path = ?, target_path = NULL, triage_reason = ?,
                   date_source = ?, processed_at = ?, dest_path = NULL
                 WHERE id = ?
                 """,
@@ -493,6 +500,13 @@ class Ledger:
             )
 
 
+def first_file(*paths: str | Path | None) -> Path | None:
+    for path in paths:
+        if path and Path(path).is_file():
+            return Path(path)
+    return None
+
+
 def _parse_time(value: str | None) -> datetime | None:
     return datetime.fromisoformat(value) if value else None
 
@@ -508,4 +522,5 @@ def _row_to_item(row: sqlite3.Row) -> Item:
         spool_path=row["spool_path"],
         dest_path=row["dest_path"],
         triage_reason=row["triage_reason"],
+        target_path=row["target_path"],
     )

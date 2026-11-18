@@ -16,6 +16,8 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 
+from .ledger import Item, Ledger
+
 # Reasons are a closed set. A new reason is a deliberate change, not an ad-hoc string.
 NO_DATE = "no_date"
 UNKNOWN_TYPE = "unknown_type"
@@ -66,6 +68,30 @@ class Triage:
         if reason not in REASONS:
             raise ValueError(f"unknown triage reason {reason!r}")
         return self.root / reason / source_id / src_path
+
+    def vacant_path(self, reason: str, item: Item) -> Path:
+        target = self.path_for(reason, item.source_id, item.src_path)
+        if target.exists():
+            target = target.with_name(f"{target.stem}_{item.id}{target.suffix}")
+        return target
+
+    def admit(
+        self, ledger: Ledger, item: Item, file: Path, *, reason: str, detail: str
+    ) -> Path:
+        target = file
+        left_here_by_a_killed_run = self.root in file.parents
+        if not left_here_by_a_killed_run:
+            target = self.vacant_path(reason, item)
+            self.record(
+                reason=reason,
+                source_id=item.source_id,
+                src_path=item.src_path,
+                triage_path=target,
+                detail=detail,
+            )
+            ledger.record_target_and_rename(item.id, file, target)
+        ledger.mark_triaged(item.id, spool_path=target, reason=reason)
+        return target
 
     def record(
         self,

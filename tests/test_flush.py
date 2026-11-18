@@ -18,7 +18,7 @@ from photocopier.ingest import ingest
 from photocopier.ledger import Ledger, State
 from photocopier.process import process
 from photocopier.rclone import Rclone
-from photocopier.resolve import pending, resolve_filed
+from photocopier.resolve import pending, render_pending, resolve_filed
 from photocopier.spool import Spool
 from photocopier.triage import DEST_CONFLICT, Triage
 
@@ -451,6 +451,7 @@ class TestKilledFlush:
             listed = [p for p in pending(ledger, Triage(spool.triage)) if p.present]
         assert [p.item.src_path for p in listed] == [PHOTO]
         assert listed[0].path.read_bytes() == original
+        assert "different content already at" in render_pending(listed, spool.triage)
 
 
 class TestIdenticalCopies:
@@ -485,6 +486,24 @@ class TestIdenticalCopies:
         assert ledger_states(spool) == [State.DELIVERED] * 2
         assert not last.missing
         assert outbox_files(spool) == set()
+
+    def test_kill_between_the_two_triage_writes_lists_both(self, wired, monkeypatch) -> None:
+        config, spool, nas, remote = wired
+        self.upload_twice(remote, b"C" * 2500)
+        pump(config, spool)
+        write_file(nas / STAGED, b"a different photo filed by hand")
+
+        kill_on_call(monkeypatch, Ledger, "mark_triaged", nth=2)
+        with pytest.raises(SimulatedSigkill):
+            run_flush(config, spool)
+        last = scheduled_pass(config, spool)
+
+        assert not last.missing
+        assert ledger_states(spool) == [State.TRIAGED] * 2
+        with Ledger(spool.ledger_path) as ledger:
+            listed = pending(ledger, Triage(spool.triage))
+        assert sorted(p.item.src_path for p in listed) == [self.A, self.B]
+        assert all(p.present and p.path.read_bytes() == b"C" * 2500 for p in listed)
 
     def test_both_go_to_triage_on_a_destination_conflict(self, wired) -> None:
         config, spool, nas, remote = wired

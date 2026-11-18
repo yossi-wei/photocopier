@@ -24,7 +24,7 @@ from pathlib import Path
 from .config import Config
 from .guards import check_free_space, check_mount_live, human_bytes
 from .layout import PHOTOS, VIDEO, file_digest, same_content
-from .ledger import Item, Ledger, State
+from .ledger import Item, Ledger, State, first_file
 from .progress import QUIET, Progress
 from .spool import Spool
 from .triage import DEST_CONFLICT, Triage
@@ -121,8 +121,9 @@ def flush_staged(
         result.missing.extend(rows)
         return
 
-    source = spool.outbox / item.dest_path
-    if not source.is_file():
+    staged = spool.outbox / item.dest_path
+    source = first_file(staged, *(row.target_path for row in rows))
+    if source is None:
         result.missing.extend(rows)
         return
 
@@ -138,26 +139,21 @@ def flush_staged(
 
         result.conflicts.extend(rows)
         if not dry_run:
-            for row in rows:
-                triage_target = triage.path_for(DEST_CONFLICT, row.source_id, row.src_path)
-                triage_target.parent.mkdir(parents=True, exist_ok=True)
-                if triage_target.exists():
-                    triage_target = triage_target.with_name(
-                        f"{triage_target.stem}_{row.id}{triage_target.suffix}"
-                    )
-                if row is rows[-1]:
-                    source.rename(triage_target)
-                else:
-                    shutil.copy2(source, triage_target)
+            detail = f"different content already at {target}"
+            for row in rows[:-1]:
+                copy = triage.vacant_path(DEST_CONFLICT, row)
+                copy.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(source, copy)
                 triage.record(
                     reason=DEST_CONFLICT,
                     source_id=row.source_id,
                     src_path=row.src_path,
-                    triage_path=triage_target,
-                    detail=f"different content already at {target}",
+                    triage_path=copy,
+                    detail=detail,
                 )
-                ledger.mark_triaged(row.id, spool_path=triage_target, reason=DEST_CONFLICT)
-            _prune_empty(spool.outbox, source.parent)
+                ledger.mark_triaged(row.id, spool_path=copy, reason=DEST_CONFLICT)
+            triage.admit(ledger, rows[-1], source, reason=DEST_CONFLICT, detail=detail)
+            _prune_empty(spool.outbox, staged.parent)
         return
 
     if dry_run:
@@ -201,7 +197,12 @@ def _drop_delivered_leftovers(
         for path in spool.outbox.rglob("*")
         if path.is_file()
     }
-    strays = {rel: path for rel, path in in_outbox.items() if rel not in staged}
+    moving_here = {item.target_path for item in ledger.items_in_state(State.INGESTED)}
+    strays = {
+        rel: path
+        for rel, path in in_outbox.items()
+        if rel not in staged and str(path) not in moving_here
+    }
     if not strays:
         return
     delivered: dict[str | None, list[Item]] = {}
