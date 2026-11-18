@@ -94,13 +94,20 @@ tests/
 
 ```
 <spool>/
-  incoming/         raw, as downloaded, source-relative paths
+  incoming/         raw, as downloaded
+    <source-id>/    source-relative paths
+      <version>/    a later version of a file whose path above is still occupied
   outbox/           exact replica of NAS layout — what will land, verbatim
     photos/YYYY/MM/
     video/YYYY/
   triage/           needs human decision, never auto-flushed
   ledger.db
 ```
+
+Ingest never writes over a file in `incoming/`. When a re-uploaded file arrives while an
+earlier version still waits at its path, the new version goes under
+`<source-id>/<version>/`, where `<version>` is the first 16 hex digits of the SHA-256 of
+the remote's hash. The ledger records each version's own spool path.
 
 `incoming/` and `outbox/` **must be on the same filesystem** so stage 2 is `rename()`,
 not a byte copy. Enforced at startup, not assumed.
