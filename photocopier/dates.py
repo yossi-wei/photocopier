@@ -30,8 +30,7 @@ from .exif import capture_datetime
 MIN_YEAR = 1990
 MAX_YEAR = 2100
 
-# PXL_20260601_112702768.jpg: Pixel stamps the capture instant in UTC, so the date comes
-# from converting that instant to the machine's zone (D10).
+# PXL_20260601_112702768.jpg: Pixel stamps the capture instant in UTC.
 PIXEL_PATTERN = re.compile(
     r"PXL_(\d{4})(\d{2})(\d{2})_(\d{2})(\d{2})(\d{2})",
     re.IGNORECASE,
@@ -39,9 +38,10 @@ PIXEL_PATTERN = re.compile(
 
 # Ordered by confidence. Each must capture year/month/day groups.
 FILENAME_PATTERNS: tuple[re.Pattern[str], ...] = (
-    # VID_20240103_101500.mp4, IMG_20221231_235959.jpg, Screenshot_20250608-073110.png
+    # PXL_20260601_112702768.jpg, VID_20240103_101500.mp4, IMG_20221231_235959.jpg,
+    # Screenshot_20250608-073110.png
     re.compile(
-        r"(?:IMG|VID|MVIMG|PANO|Screenshot)[_-](?P<y>\d{4})(?P<m>\d{2})(?P<d>\d{2})[_-]",
+        r"(?:PXL|IMG|VID|MVIMG|PANO|Screenshot)[_-](?P<y>\d{4})(?P<m>\d{2})(?P<d>\d{2})[_-]",
         re.IGNORECASE,
     ),
     # 20210706_142116.jpg
@@ -72,7 +72,6 @@ def _build(year: int, month: int, day: int = 1) -> date | None:
 
 
 def _local_date(instant: datetime) -> date | None:
-    """The calendar date of an aware instant in the machine's zone, read at runtime."""
     try:
         local = instant.astimezone().date()
     except (OverflowError, OSError, ValueError):
@@ -80,14 +79,20 @@ def _local_date(instant: datetime) -> date | None:
     return _build(local.year, local.month, local.day)
 
 
+def _pixel_date(filename: str) -> date | None:
+    if not (match := PIXEL_PATTERN.search(filename)):
+        return None
+    try:
+        instant = datetime(*map(int, match.groups()), tzinfo=UTC)
+    except ValueError:
+        return None
+    return _local_date(instant)
+
+
 def date_from_filename(filename: str) -> date | None:
     """Extract a capture date encoded in the filename, if one is plausibly there."""
-    if match := PIXEL_PATTERN.search(filename):
-        try:
-            instant = datetime(*map(int, match.groups()), tzinfo=UTC)
-        except ValueError:
-            return None
-        return _local_date(instant)
+    if resolved := _pixel_date(filename):
+        return resolved
     for pattern in FILENAME_PATTERNS:
         match = pattern.search(filename)
         if not match:
