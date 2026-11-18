@@ -2,6 +2,11 @@
 
 from __future__ import annotations
 
+# Enough rclone stderr to name the failure, bounded so one bad listing cannot flood the
+# report, the CLI line, or the launcher's failure email.
+STDERR_TAIL_LINES = 3
+STDERR_TAIL_CHARS = 500
+
 
 class PhotocopierError(Exception):
     """Base for anything we raise deliberately."""
@@ -25,7 +30,10 @@ class RcloneError(PhotocopierError):
 
     def report(self) -> str:
         kept = [line.strip() for line in self.stderr.splitlines() if line.strip()]
-        return " | ".join([str(self), *kept[-2:]])
+        tail = " | ".join(kept[-STDERR_TAIL_LINES:])
+        if len(kept) > STDERR_TAIL_LINES or len(tail) > STDERR_TAIL_CHARS:
+            tail = "... " + tail[-STDERR_TAIL_CHARS:]
+        return " | ".join(part for part in (str(self), tail) if part)
 
 
 class LedgerError(PhotocopierError):

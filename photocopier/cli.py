@@ -334,12 +334,17 @@ def cmd_ingest(args: argparse.Namespace) -> int:
         # Flushed first so a supervisor that keeps stdout and stderr together, such as the
         # launcher's failure email, sees the error lines last.
         print(render(result, spool), flush=True)
+        failed = [source.source_id for source in result.sources if source.listing_error]
         for source in result.sources:
             if source.listing_error:
                 print(
                     f"error: {source.source_id}: listing failed: {source.listing_error}",
                     file=sys.stderr,
                 )
+        if failed:
+            # Last, so the final line of output names every failed source, even when a
+            # supervisor keeps only the last couple of lines.
+            print(f"error: listing failed for {', '.join(failed)}", file=sys.stderr)
 
     return 1 if result.any_failed else 0
 
