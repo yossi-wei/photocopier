@@ -194,7 +194,7 @@ class TestWindow:
                 "2025/06/PXL_20250630_120000.jpg": 100,
                 "2025/07/PXL_20250701_120000.jpg": 100,
                 "2025/07/PXL_20250731_235959.mp4": 100,
-                "2025/08/PXL_20250801_000000.jpg": 100,
+                "2025/08/PXL_20250801_120000.jpg": 100,
                 "2026/02/PXL_20260201_120000.jpg": 100,
                 "1969/1J1A3188.jpg": 100,
             },
@@ -235,7 +235,7 @@ class TestWindow:
         wider = self.run_window(config, spool, since=date(2025, 6, 1))
         assert {item.name for item in wider.sources[0].ingested} == {
             "PXL_20250630_120000.jpg",
-            "PXL_20250801_000000.jpg",
+            "PXL_20250801_120000.jpg",
             "PXL_20260201_120000.jpg",
         }
 
