@@ -138,14 +138,17 @@ def flush_staged(
 
         result.conflicts.extend(rows)
         if not dry_run:
-            triage_target = triage.path_for(DEST_CONFLICT, item.source_id, item.src_path)
-            triage_target.parent.mkdir(parents=True, exist_ok=True)
-            if triage_target.exists():
-                triage_target = triage_target.with_name(
-                    f"{triage_target.stem}_{item.id}{triage_target.suffix}"
-                )
-            source.rename(triage_target)
             for row in rows:
+                triage_target = triage.path_for(DEST_CONFLICT, row.source_id, row.src_path)
+                triage_target.parent.mkdir(parents=True, exist_ok=True)
+                if triage_target.exists():
+                    triage_target = triage_target.with_name(
+                        f"{triage_target.stem}_{row.id}{triage_target.suffix}"
+                    )
+                if row is rows[-1]:
+                    source.rename(triage_target)
+                else:
+                    shutil.copy2(source, triage_target)
                 triage.record(
                     reason=DEST_CONFLICT,
                     source_id=row.source_id,
@@ -184,6 +187,39 @@ def _mark_delivered_then_reclaim(
     _prune_empty(spool.outbox, source.parent)
 
 
+def _drop_delivered_leftovers(
+    config: Config,
+    ledger: Ledger,
+    spool: Spool,
+    staged: dict[str | None, list[Item]],
+    result: FlushResult,
+    *,
+    dry_run: bool,
+) -> None:
+    in_outbox = {
+        path.relative_to(spool.outbox).as_posix(): path
+        for path in spool.outbox.rglob("*")
+        if path.is_file()
+    }
+    strays = {rel: path for rel, path in in_outbox.items() if rel not in staged}
+    if not strays:
+        return
+    delivered: dict[str | None, list[Item]] = {}
+    for item in ledger.items_in_state(State.DELIVERED):
+        delivered.setdefault(item.dest_path, []).append(item)
+    for dest_path, path in strays.items():
+        rows = delivered.get(dest_path)
+        if not rows:
+            continue
+        target = destination_root(config, dest_path)
+        if not (target.is_file() and same_content(target, path)):
+            continue
+        result.already_there.extend(rows)
+        if not dry_run:
+            path.unlink()
+            _prune_empty(spool.outbox, path.parent)
+
+
 def _staged_size(spool: Spool, item: Item) -> int:
     if not item.dest_path:
         return 0
@@ -211,6 +247,7 @@ def flush(
         check_free_space(config.destination.mount_point, staged_bytes)
 
     result = FlushResult(dry_run=dry_run)
+    _drop_delivered_leftovers(config, ledger, spool, staged, result, dry_run=dry_run)
     triage = Triage(spool.triage)
     with progress.task("flush", items=len(staged), total_bytes=staged_bytes) as task:
         for rows, size in zip(staged.values(), sizes, strict=True):

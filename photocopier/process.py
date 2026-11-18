@@ -20,6 +20,7 @@ from pathlib import Path
 
 from .config import Config
 from .dates import resolve
+from .flush import destination_root
 from .layout import Destination, destination_for, same_content
 from .ledger import Item, Ledger, State
 from .progress import QUIET, Progress
@@ -132,6 +133,47 @@ def process_item(
     _prune_empty(spool.incoming, source.parent)
 
 
+def _drop_moved_on_leftovers(
+    config: Config,
+    ledger: Ledger,
+    spool: Spool,
+    pending: list[Item],
+    result: ProcessResult,
+    *,
+    dry_run: bool,
+) -> None:
+    waiting = {item.spool_path for item in pending}
+    strays = [
+        path
+        for path in spool.incoming.rglob("*")
+        if path.is_file() and str(path) not in waiting
+    ]
+    if not strays:
+        return
+    moved_on: dict[str, list[Item]] = {}
+    for state in (State.PROCESSED, State.DELIVERED):
+        for item in ledger.items_in_state(state):
+            if item.dest_path:
+                landed = spool.source_incoming(item.source_id) / item.src_path
+                moved_on.setdefault(str(landed), []).append(item)
+    for path in strays:
+        held = _held_downstream(path, moved_on.get(str(path), []), config, spool)
+        if held is None:
+            continue
+        result.duplicates.append(held)
+        if not dry_run:
+            path.unlink()
+            _prune_empty(spool.incoming, path.parent)
+
+
+def _held_downstream(path: Path, items: list[Item], config: Config, spool: Spool) -> Item | None:
+    for item in items:
+        for copy in (spool.outbox / item.dest_path, destination_root(config, item.dest_path)):
+            if copy.is_file() and same_content(path, copy):
+                return item
+    return None
+
+
 def _triage(
     item: Item,
     source: Path,
@@ -175,6 +217,7 @@ def process(
     triage = Triage(spool.triage)
 
     pending = ledger.items_in_state(State.INGESTED)
+    _drop_moved_on_leftovers(config, ledger, spool, pending, result, dry_run=dry_run)
     with progress.task("process", items=len(pending)) as task:
         for item in pending:
             task.current(Path(item.src_path).name)
