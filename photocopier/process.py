@@ -44,11 +44,6 @@ class ProcessResult:
         return len(self.triaged) / self.total_seen if self.total_seen else 0.0
 
 
-def _prune_incoming(spool: Spool, item: Item) -> None:
-    if item.spool_path:
-        _prune_empty(spool.incoming, Path(item.spool_path).parent)
-
-
 def _prune_empty(root: Path, leaf: Path) -> None:
     """Remove directories left empty by a move, without escaping the spool."""
     current = leaf
@@ -109,7 +104,7 @@ def process_item(
                     resolved_date=when.isoformat(), date_source=date_source,
                 )
                 source.unlink()
-                _prune_incoming(spool, item)
+                _prune_empty(spool.incoming, source.parent)
             return
         _triage(item, source, DEST_CONFLICT,
                 f"different content already staged at {destination.relative}",
@@ -128,7 +123,7 @@ def process_item(
         resolved_date=when.isoformat(),
         date_source=date_source,
     )
-    _prune_incoming(spool, item)
+    _prune_empty(spool.incoming, source.parent)
 
 
 def _drop_moved_on_leftovers(
@@ -189,7 +184,7 @@ def _triage(
         return
 
     triage.admit(moves, item, source, reason=reason, detail=detail)
-    _prune_incoming(spool, item)
+    _prune_empty(spool.incoming, source.parent)
 
 
 def process(
