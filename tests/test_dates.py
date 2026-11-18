@@ -7,8 +7,6 @@ It must stay unresolvable rather than being believed.
 from __future__ import annotations
 
 import shutil
-import time
-from collections.abc import Iterator
 from datetime import date
 from pathlib import Path
 
@@ -48,8 +46,24 @@ STRIPPED_JPEG = "1J1A3188.jpg"
         ("img_6_1749913720949.jpg", date(2025, 6, 14)),
     ],
 )
+@pytest.mark.usefixtures("eastern")
 def test_date_from_filename(filename: str, expected: date) -> None:
     assert date_from_filename(filename) == expected
+
+
+@pytest.mark.usefixtures("eastern")
+def test_pxl_name_without_six_digit_time_keeps_its_date() -> None:
+    assert date_from_filename("PXL_20260601_1127.jpg") == date(2026, 6, 1)
+
+
+@pytest.mark.usefixtures("eastern")
+def test_pxl_dash_separated_name_keeps_its_date() -> None:
+    assert date_from_filename("PXL-20260601-112702768.jpg") == date(2026, 6, 1)
+
+
+@pytest.mark.usefixtures("eastern")
+def test_home_zone_rule_files_a_video_shot_abroad_on_new_years_day_in_the_old_year() -> None:
+    assert date_from_filename("PXL_20270101_010000000.mp4") == date(2026, 12, 31)
 
 
 @pytest.mark.parametrize(
@@ -153,16 +167,6 @@ class TestUntil:
         assert not is_on_or_after("1969/1J1A3188.jpg", "1J1A3188.jpg", date(2025, 8, 1))
 
 
-@pytest.fixture
-def eastern(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
-    """Pin the process to US Eastern, so local-date expectations hold on any machine."""
-    monkeypatch.setenv("TZ", "America/New_York")
-    time.tzset()
-    yield
-    monkeypatch.undo()
-    time.tzset()
-
-
 def ingest_then_process(config, spool) -> None:
     with Ledger(spool.ledger_path) as ledger:
         ingest(config, Rclone(config.rclone), ledger, spool)
@@ -184,7 +188,6 @@ def place(remote_root: Path, rel: str, fixture: str) -> None:
 def test_pixel_video_from_new_years_eve_is_filed_in_the_year_it_was_taken(
     config, spool, remote_root
 ):
-    """22:00 EST on 31 Dec 2026 is 03:00 UTC on 1 Jan 2027, which the Pixel name records."""
     populate(remote_root / CAMERA_ROLL, {"2026/12/PXL_20270101_030000000.mp4": 512})
     ingest_then_process(config, spool)
     assert outbox(spool) == {"video/2026/PXL_20270101_030000000_phone-1.mp4"}
@@ -192,7 +195,6 @@ def test_pixel_video_from_new_years_eve_is_filed_in_the_year_it_was_taken(
 
 @pytest.mark.usefixtures("eastern")
 def test_pixel_photo_without_exif_is_filed_in_the_local_month(config, spool, remote_root):
-    """D10's own example, with the EXIF stripped (edited, shared, or re-saved)."""
     place(remote_root, "2026/10/PXL_20261101_021009424.jpg", STRIPPED_JPEG)
     ingest_then_process(config, spool)
     assert outbox(spool) == {"photos/2026/10/PXL_20261101_021009424_phone-1.jpg"}
@@ -200,7 +202,6 @@ def test_pixel_photo_without_exif_is_filed_in_the_local_month(config, spool, rem
 
 @pytest.mark.usefixtures("eastern")
 def test_epoch_ms_photo_is_filed_in_the_local_month(config, spool, remote_root):
-    """1793499009000 ms is 2026-11-01T02:10:09Z, 22:10 EDT on 31 Oct."""
     place(remote_root, "2026/10/1793499009000.jpg", STRIPPED_JPEG)
     ingest_then_process(config, spool)
     assert outbox(spool) == {"photos/2026/10/1793499009000_phone-1.jpg"}

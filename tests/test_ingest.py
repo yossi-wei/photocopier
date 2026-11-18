@@ -177,6 +177,7 @@ class TestCutoff:
 
 
 
+@pytest.mark.usefixtures("eastern")
 class TestWindow:
     """`--since` / `--until`: one run narrowed to a date range, to fill a missed month."""
 
