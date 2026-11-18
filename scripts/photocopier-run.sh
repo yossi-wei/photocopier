@@ -163,6 +163,8 @@ if [ -n "$oldest" ]; then
   [ "$age_days" -ge "$BACKLOG_WARN_DAYS" ] && warn="WARNING: undelivered files have been waiting $age_days days."
 fi
 status_warn="$(printf '%s\n' "$status_out" | grep '^WARNING: ' || true)"
+# Each WARNING line is shown once, above STATUS, so the STATUS copy leaves those lines out.
+status_body="$(printf '%s\n' "$status_out" | grep -v '^WARNING: ' || true)"
 triaged="$(printf '%s' "$status_out" | awk '/triaged/ {print $2; exit}')"
 
 today="$(date +%F)"
@@ -179,7 +181,7 @@ compose() {
   [ -n "$warn" ] && { echo "$warn"; echo; }
   [ -n "$status_warn" ] && { echo "$status_warn"; echo; }
   [ -n "$nas_note" ] && { echo "$nas_note"; echo; }
-  echo "STATUS"; echo "$status_out"; echo
+  echo "STATUS"; echo "$status_body"; echo
   echo "THIS RUN"; printf '%s' "$step_out"
   echo "Log: $run_log"
 }
