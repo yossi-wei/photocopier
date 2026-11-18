@@ -153,7 +153,7 @@ class TestList:
 
     @pytest.mark.parametrize(
         ("owner", "step"),
-        [(Triage, "record"), (Ledger, "record_target_and_rename"), (Path, "rename")],
+        [(Triage, "record"), (Ledger, "record_target"), (Path, "rename")],
     )
     def test_kill_before_the_move_into_triage_lists_the_item_once(
         self, wired, monkeypatch, owner, step

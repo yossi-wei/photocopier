@@ -18,7 +18,7 @@ from .config import Config
 from .dates import resolve
 from .flush import destination_root
 from .layout import Destination, destination_for, same_content
-from .ledger import Item, Ledger, State, first_file
+from .ledger import Item, Ledger, Moves, State
 from .progress import QUIET, Progress
 from .spool import Spool
 from .triage import DEST_CONFLICT, NO_DATE, UNKNOWN_TYPE, Triage
@@ -66,12 +66,13 @@ def process_item(
     spool: Spool,
     triage: Triage,
     ledger: Ledger,
+    moves: Moves,
     result: ProcessResult,
     *,
     dry_run: bool,
 ) -> None:
-    source = first_file(item.spool_path, item.target_path)
-    if source is None:
+    source = Path(item.spool_path) if item.spool_path else None
+    if source is None or not source.is_file():
         result.missing.append(item)
         return
 
@@ -80,7 +81,7 @@ def process_item(
 
     if kind == "unknown":
         _triage(item, source, UNKNOWN_TYPE, f"unrecognised extension: {filename}",
-                triage, ledger, result, spool, dry_run=dry_run)
+                triage, moves, result, spool, dry_run=dry_run)
         return
 
     when, date_source = resolve(source, item.src_path, filename, try_exif=kind == "photo")
@@ -88,7 +89,7 @@ def process_item(
 
     if when is None:
         _triage(item, source, NO_DATE, "no date in EXIF, filename, or source path",
-                triage, ledger, result, spool, dry_run=dry_run)
+                triage, moves, result, spool, dry_run=dry_run)
         return
 
     suffix = config.source(item.source_id).suffix
@@ -112,18 +113,17 @@ def process_item(
             return
         _triage(item, source, DEST_CONFLICT,
                 f"different content already staged at {destination.relative}",
-                triage, ledger, result, spool, dry_run=dry_run)
+                triage, moves, result, spool, dry_run=dry_run)
         return
 
     result.filed.append((item, destination))
     if dry_run:
         return
 
-    if source != target:
-        ledger.record_target_and_rename(item.id, source, target)
-    ledger.mark_processed(
+    moves.to_outbox(
         item.id,
-        spool_path=target,
+        source,
+        target,
         dest_path=str(destination.relative),
         resolved_date=when.isoformat(),
         date_source=date_source,
@@ -178,7 +178,7 @@ def _triage(
     reason: str,
     detail: str,
     triage: Triage,
-    ledger: Ledger,
+    moves: Moves,
     result: ProcessResult,
     spool: Spool,
     *,
@@ -188,7 +188,7 @@ def _triage(
     if dry_run:
         return
 
-    triage.admit(ledger, item, source, reason=reason, detail=detail)
+    triage.admit(moves, item, source, reason=reason, detail=detail)
     _prune_incoming(spool, item)
 
 
@@ -202,13 +202,14 @@ def process(
 ) -> ProcessResult:
     result = ProcessResult(dry_run=dry_run)
     triage = Triage(spool.triage)
+    triage.settle(ledger)
 
     pending = ledger.items_in_state(State.INGESTED)
     _drop_moved_on_leftovers(config, ledger, spool, pending, result, dry_run=dry_run)
-    with progress.task("process", items=len(pending)) as task:
+    with Moves(ledger) as moves, progress.task("process", items=len(pending)) as task:
         for item in pending:
             task.current(Path(item.src_path).name)
-            process_item(item, config, spool, triage, ledger, result, dry_run=dry_run)
+            process_item(item, config, spool, triage, ledger, moves, result, dry_run=dry_run)
             task.advance()
 
     return result

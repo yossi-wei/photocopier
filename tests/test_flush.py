@@ -455,8 +455,6 @@ class TestKilledFlush:
 
 
 class TestKilledWhileTriagingAConflict:
-    """flush moved a photo into triage and was killed before its row said so."""
-
     OWN = b"A" * 4096
     LATER = "2026/06/b/PXL_20260615_101500.jpg"
 

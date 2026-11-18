@@ -24,7 +24,7 @@ from pathlib import Path
 from .config import Config
 from .guards import check_free_space, check_mount_live, human_bytes
 from .layout import PHOTOS, VIDEO, file_digest, same_content
-from .ledger import Item, Ledger, State, first_file
+from .ledger import Item, Ledger, Moves, State
 from .progress import QUIET, Progress
 from .spool import Spool
 from .triage import DEST_CONFLICT, Triage
@@ -121,9 +121,8 @@ def flush_staged(
         result.missing.extend(rows)
         return
 
-    staged = spool.outbox / item.dest_path
-    source = first_file(staged, *(row.target_path for row in rows))
-    if source is None:
+    source = spool.outbox / item.dest_path
+    if not source.is_file():
         result.missing.extend(rows)
         return
 
@@ -152,8 +151,9 @@ def flush_staged(
                     detail=detail,
                 )
                 ledger.mark_triaged(row.id, spool_path=copy, reason=DEST_CONFLICT)
-            triage.admit(ledger, rows[-1], source, reason=DEST_CONFLICT, detail=detail)
-            _prune_empty(spool.outbox, staged.parent)
+            with Moves(ledger) as moves:
+                triage.admit(moves, rows[-1], source, reason=DEST_CONFLICT, detail=detail)
+            _prune_empty(spool.outbox, source.parent)
         return
 
     if dry_run:
@@ -197,7 +197,7 @@ def _drop_delivered_leftovers(
         for path in spool.outbox.rglob("*")
         if path.is_file()
     }
-    moving_here = {item.target_path for item in ledger.items_in_state(State.INGESTED)}
+    moving_here = {item.spool_path for item in ledger.items_in_state(State.INGESTED)}
     strays = {
         rel: path
         for rel, path in in_outbox.items()
@@ -238,6 +238,8 @@ def flush(
 ) -> FlushResult:
     """Deliver everything staged. Guards run first and refuse rather than proceed."""
     check_mount_live(config.destination.mount_point, config.destination.mount_marker)
+    triage = Triage(spool.triage)
+    triage.settle(ledger)
 
     staged: dict[str | None, list[Item]] = {}
     for item in ledger.items_in_state(State.PROCESSED):
@@ -249,7 +251,6 @@ def flush(
 
     result = FlushResult(dry_run=dry_run)
     _drop_delivered_leftovers(config, ledger, spool, staged, result, dry_run=dry_run)
-    triage = Triage(spool.triage)
     with progress.task("flush", items=len(staged), total_bytes=staged_bytes) as task:
         for rows, size in zip(staged.values(), sizes, strict=True):
             task.current(Path(rows[0].dest_path or rows[0].src_path).name)

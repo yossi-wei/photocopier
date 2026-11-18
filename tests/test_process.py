@@ -302,7 +302,7 @@ class TestKilledProcess:
         assert (nas / STAGED).read_bytes() == original
 
     @pytest.mark.parametrize(
-        ("owner", "step"), [(Ledger, "record_target_and_rename"), (Path, "rename")]
+        ("owner", "step"), [(Ledger, "record_target"), (Path, "rename")]
     )
     def test_kill_before_the_rename_converges(self, wired, monkeypatch, owner, step) -> None:
         config, spool, nas, remote = wired

@@ -9,11 +9,12 @@ that is its whole reason for existing. See D1.
 from __future__ import annotations
 
 import sqlite3
-from collections.abc import Iterable, Iterator
+from collections.abc import Callable, Iterable, Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from enum import StrEnum
+from functools import partial
 from pathlib import Path
 
 from .errors import LedgerError
@@ -144,6 +145,7 @@ class Ledger:
     def __init__(self, path: Path):
         self.path = path
         self._conn: sqlite3.Connection | None = None
+        self._in_transaction = False
 
     # -- lifecycle -------------------------------------------------------
 
@@ -188,6 +190,10 @@ class Ledger:
 
     @contextmanager
     def transaction(self) -> Iterator[sqlite3.Connection]:
+        if self._in_transaction:
+            yield self.conn
+            return
+        self._in_transaction = True
         try:
             yield self.conn
         except Exception:
@@ -195,6 +201,8 @@ class Ledger:
             raise
         else:
             self.conn.commit()
+        finally:
+            self._in_transaction = False
 
     # -- queries ---------------------------------------------------------
 
@@ -242,6 +250,13 @@ class Ledger:
             params.append(source_id)
         sql += " ORDER BY src_path"
         return [_row_to_item(row) for row in self.conn.execute(sql, params)]
+
+    def items_moving(self) -> list[Item]:
+        rows = self.conn.execute(
+            "SELECT * FROM items WHERE state IN (?, ?) AND target_path IS NOT NULL",
+            (State.INGESTED.value, State.PROCESSED.value),
+        )
+        return [_row_to_item(row) for row in rows]
 
     def total_bytes_in_state(self, state: State) -> int:
         row = self.conn.execute(
@@ -370,13 +385,18 @@ class Ledger:
                 ),
             )
 
-    def record_target_and_rename(self, item_id: int, source: Path, target: Path) -> None:
+    def record_target(self, item_id: int, target: Path) -> None:
         with self.transaction() as conn:
             conn.execute(
                 "UPDATE items SET target_path = ? WHERE id = ?", (str(target), item_id)
             )
-        target.parent.mkdir(parents=True, exist_ok=True)
-        source.rename(target)
+
+    def moved(self, item_id: int, spool_path: Path) -> None:
+        with self.transaction() as conn:
+            conn.execute(
+                "UPDATE items SET spool_path = ?, target_path = NULL WHERE id = ?",
+                (str(spool_path), item_id),
+            )
 
     def mark_processed(
         self,
@@ -387,7 +407,6 @@ class Ledger:
         resolved_date: str,
         date_source: str,
     ) -> None:
-        """Record a file that is confirmed present at its outbox location."""
         with self.transaction() as conn:
             conn.execute(
                 """
@@ -500,11 +519,38 @@ class Ledger:
             )
 
 
-def first_file(*paths: str | Path | None) -> Path | None:
-    for path in paths:
-        if path and Path(path).is_file():
-            return Path(path)
-    return None
+class Moves:
+    def __init__(self, ledger: Ledger) -> None:
+        self._ledger = ledger
+        self._last_outcome: Callable[[], None] | None = None
+
+    def __enter__(self) -> Moves:
+        return self
+
+    def __exit__(self, exc_type: type[BaseException] | None, *_: object) -> None:
+        if exc_type is None:
+            self._record_last_outcome()
+
+    def to_outbox(self, item_id: int, source: Path, target: Path, **processed: str) -> None:
+        outcome = partial(self._ledger.mark_processed, item_id, spool_path=target, **processed)
+        self._move(item_id, source, target, outcome)
+
+    def to_triage(self, item_id: int, source: Path, target: Path, *, reason: str) -> None:
+        outcome = partial(self._ledger.mark_triaged, item_id, spool_path=target, reason=reason)
+        self._move(item_id, source, target, outcome)
+
+    def _record_last_outcome(self) -> None:
+        if self._last_outcome:
+            self._last_outcome()
+            self._last_outcome = None
+
+    def _move(self, item_id: int, source: Path, target: Path, outcome: Callable[[], None]) -> None:
+        with self._ledger.transaction():
+            self._record_last_outcome()
+            self._ledger.record_target(item_id, target)
+        self._last_outcome = outcome
+        target.parent.mkdir(parents=True, exist_ok=True)
+        source.rename(target)
 
 
 def _parse_time(value: str | None) -> datetime | None:

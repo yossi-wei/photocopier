@@ -16,7 +16,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 
-from .ledger import Item, Ledger
+from .ledger import Item, Ledger, Moves
 
 # Reasons are a closed set. A new reason is a deliberate change, not an ad-hoc string.
 NO_DATE = "no_date"
@@ -75,23 +75,30 @@ class Triage:
             target = target.with_name(f"{target.stem}_{item.id}{target.suffix}")
         return target
 
-    def admit(
-        self, ledger: Ledger, item: Item, file: Path, *, reason: str, detail: str
-    ) -> Path:
-        target = file
-        left_here_by_a_killed_run = self.root in file.parents
-        if not left_here_by_a_killed_run:
-            target = self.vacant_path(reason, item)
-            self.record(
-                reason=reason,
-                source_id=item.source_id,
-                src_path=item.src_path,
-                triage_path=target,
-                detail=detail,
-            )
-            ledger.record_target_and_rename(item.id, file, target)
-        ledger.mark_triaged(item.id, spool_path=target, reason=reason)
-        return target
+    def admit(self, moves: Moves, item: Item, file: Path, *, reason: str, detail: str) -> None:
+        target = self.vacant_path(reason, item)
+        self.record(
+            reason=reason,
+            source_id=item.source_id,
+            src_path=item.src_path,
+            triage_path=target,
+            detail=detail,
+        )
+        moves.to_triage(item.id, file, target, reason=reason)
+
+    def settle(self, ledger: Ledger) -> None:
+        with ledger.transaction():
+            for item in ledger.items_moving():
+                target = Path(str(item.target_path))
+                still_at_source = item.spool_path and Path(item.spool_path).is_file()
+                arrived = target.is_file() and target.stat().st_size == item.src_size
+                if still_at_source or not arrived:
+                    continue
+                if self.root in target.parents:
+                    reason = target.relative_to(self.root).parts[0]
+                    ledger.mark_triaged(item.id, spool_path=target, reason=reason)
+                else:
+                    ledger.moved(item.id, target)
 
     def record(
         self,
