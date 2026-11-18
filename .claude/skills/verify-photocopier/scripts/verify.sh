@@ -196,7 +196,8 @@ cmd_snapshot() {
     if [ -f "$sb/spool/ledger.db" ]; then
       # The ledger is WAL-mode. After a clean close SQLite removes -wal/-shm and a read-only
       # open fails, so read it as immutable. After a killed run the -wal file holds committed
-      # rows that immutable ignores, so read it read-only, which also leaves the files as-is.
+      # rows that immutable ignores, so read it read-only: the ledger and its -wal stay unchanged
+      # (SQLite may rebuild the -shm index, which holds no ledger data).
       local db="file:$sb/spool/ledger.db?immutable=1"
       [ -f "$sb/spool/ledger.db-wal" ] && db="file:$sb/spool/ledger.db?mode=ro"
       sqlite3 -header -column "$db" \
