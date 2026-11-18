@@ -134,6 +134,23 @@ class TestList:
         assert listed[0].path.read_bytes() == original
         assert "no date in EXIF" in render_pending(listed, spool.triage)
 
+    def test_kill_while_triaging_lists_the_item_before_another_pass(
+        self, wired, monkeypatch
+    ) -> None:
+        config, spool, _nas, remote = wired
+        populate(remote / CAMERA_ROLL, {"undated/1J1A3188.jpg": 2048})
+        original = (remote / CAMERA_ROLL / "undated/1J1A3188.jpg").read_bytes()
+
+        kill_on_call(monkeypatch, Ledger, "mark_triaged")
+        with pytest.raises(SimulatedSigkill):
+            pump(config, spool)
+
+        with Ledger(spool.ledger_path) as ledger:
+            listed = pending(ledger, Triage(spool.triage))
+        assert [(p.item.src_path, p.present) for p in listed] == [("undated/1J1A3188.jpg", True)]
+        assert listed[0].path.read_bytes() == original
+        assert "no date in EXIF" in render_pending(listed, spool.triage)
+
     @pytest.mark.parametrize(
         ("owner", "step"),
         [(Triage, "record"), (Ledger, "record_target_and_rename"), (Path, "rename")],

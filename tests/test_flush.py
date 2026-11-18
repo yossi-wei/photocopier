@@ -454,6 +454,69 @@ class TestKilledFlush:
         assert "different content already at" in render_pending(listed, spool.triage)
 
 
+class TestKilledWhileTriagingAConflict:
+    """flush moved a photo into triage and was killed before its row said so."""
+
+    OWN = b"A" * 4096
+    LATER = "2026/06/b/PXL_20260615_101500.jpg"
+
+    def kill_while_triaging(self, wired, monkeypatch, *, on_the_nas: bytes) -> None:
+        config, spool, nas, remote = wired
+        write_file(remote / CAMERA_ROLL / PHOTO, self.OWN)
+        pump(config, spool)
+        write_file(nas / STAGED, on_the_nas)
+        original = Ledger.mark_triaged
+        kill_on_call(monkeypatch, Ledger, "mark_triaged")
+        with pytest.raises(SimulatedSigkill):
+            run_flush(config, spool)
+        monkeypatch.setattr(Ledger, "mark_triaged", original)
+
+    def listed(self, spool: Spool) -> dict[str, bytes]:
+        with Ledger(spool.ledger_path) as ledger:
+            return {
+                p.item.src_path: p.path.read_bytes()
+                for p in pending(ledger, Triage(spool.triage))
+                if p.present
+            }
+
+    def states(self, spool: Spool) -> dict[str, str]:
+        with Ledger(spool.ledger_path) as ledger:
+            rows = ledger.conn.execute("SELECT src_path, state FROM items")
+            return {row["src_path"]: row["state"] for row in rows}
+
+    def test_the_row_is_listed_without_another_pass(self, wired, monkeypatch) -> None:
+        _config, spool, _nas, _remote = wired
+        self.kill_while_triaging(wired, monkeypatch, on_the_nas=b"Y" * 4096)
+
+        assert self.listed(spool) == {PHOTO: self.OWN}
+
+    def test_a_later_photo_for_the_same_destination_keeps_the_row_on_its_own_bytes(
+        self, wired, monkeypatch
+    ) -> None:
+        config, spool, nas, remote = wired
+        self.kill_while_triaging(wired, monkeypatch, on_the_nas=b"Y" * 4096)
+        write_file(remote / CAMERA_ROLL / self.LATER, b"Z" * 4096)
+        pump(config, spool)
+        run_flush(config, spool)
+
+        assert self.listed(spool) == {PHOTO: self.OWN, self.LATER: b"Z" * 4096}
+        assert (nas / STAGED).read_bytes() == b"Y" * 4096
+
+    def test_a_later_copy_of_the_nas_file_is_not_delivered_in_its_place(
+        self, wired, monkeypatch
+    ) -> None:
+        config, spool, nas, remote = wired
+        self.kill_while_triaging(wired, monkeypatch, on_the_nas=b"Z" * 4096)
+        write_file(remote / CAMERA_ROLL / self.LATER, b"Z" * 4096)
+        pump(config, spool)
+        run_flush(config, spool)
+        run_flush(config, spool)
+
+        assert self.states(spool) == {PHOTO: State.TRIAGED, self.LATER: State.DELIVERED}
+        assert self.listed(spool) == {PHOTO: self.OWN}
+        assert (nas / STAGED).read_bytes() == b"Z" * 4096
+
+
 class TestIdenticalCopies:
     A = "2026/06/a/PXL_20260615_101500.jpg"
     B = "2026/06/b/PXL_20260615_101500.jpg"
