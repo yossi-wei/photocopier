@@ -54,6 +54,7 @@ CREATE TABLE IF NOT EXISTS items (
   attempts      INTEGER NOT NULL DEFAULT 0,
   last_error    TEXT,
   target_path   TEXT,
+  target_identity TEXT,
   UNIQUE (source_id, src_path, src_hash)
 );
 
@@ -93,6 +94,7 @@ class Item:
     dest_path: str | None = None
     triage_reason: str | None = None
     target_path: str | None = None
+    target_identity: str | None = None
 
 
 @dataclass(frozen=True)
@@ -160,8 +162,9 @@ class Ledger:
         self._conn.execute("PRAGMA foreign_keys=ON")
         self._conn.executescript(SCHEMA)
         columns = {row["name"] for row in self._conn.execute("PRAGMA table_info(items)")}
-        if "target_path" not in columns:
-            self._conn.execute("ALTER TABLE items ADD COLUMN target_path TEXT")
+        for column in ("target_path", "target_identity"):
+            if column not in columns:
+                self._conn.execute(f"ALTER TABLE items ADD COLUMN {column} TEXT")
         self._conn.execute(
             "INSERT INTO meta (key, value) VALUES ('schema_version', ?) "
             "ON CONFLICT(key) DO UPDATE SET value = excluded.value "
@@ -253,7 +256,7 @@ class Ledger:
 
     def items_moving(self) -> list[Item]:
         rows = self.conn.execute(
-            "SELECT * FROM items WHERE state IN (?, ?) AND target_path IS NOT NULL",
+            "SELECT * FROM items WHERE state IN (?, ?) AND target_identity IS NOT NULL",
             (State.INGESTED.value, State.PROCESSED.value),
         )
         return [_row_to_item(row) for row in rows]
@@ -385,16 +388,18 @@ class Ledger:
                 ),
             )
 
-    def record_target(self, item_id: int, target: Path) -> None:
+    def record_target(self, item_id: int, target: Path, identity: str | None) -> None:
         with self.transaction() as conn:
             conn.execute(
-                "UPDATE items SET target_path = ? WHERE id = ?", (str(target), item_id)
+                "UPDATE items SET target_path = ?, target_identity = ? WHERE id = ?",
+                (str(target), identity, item_id),
             )
 
     def moved(self, item_id: int, spool_path: Path) -> None:
         with self.transaction() as conn:
             conn.execute(
-                "UPDATE items SET spool_path = ?, target_path = NULL WHERE id = ?",
+                "UPDATE items SET spool_path = ?, target_path = NULL, target_identity = NULL "
+                "WHERE id = ?",
                 (str(spool_path), item_id),
             )
 
@@ -411,7 +416,8 @@ class Ledger:
             conn.execute(
                 """
                 UPDATE items SET
-                  state = ?, spool_path = ?, target_path = NULL, dest_path = ?,
+                  state = ?, spool_path = ?, target_path = NULL, target_identity = NULL,
+                  dest_path = ?,
                   resolved_date = ?, date_source = ?, processed_at = ?,
                   triage_reason = NULL, last_error = NULL
                 WHERE id = ?
@@ -435,7 +441,8 @@ class Ledger:
             conn.execute(
                 """
                 UPDATE items SET
-                  state = ?, spool_path = ?, target_path = NULL, triage_reason = ?,
+                  state = ?, spool_path = ?, target_path = NULL, target_identity = NULL,
+                  triage_reason = ?,
                   date_source = ?, processed_at = ?, dest_path = NULL
                 WHERE id = ?
                 """,
@@ -545,12 +552,23 @@ class Moves:
             self._last_outcome = None
 
     def _move(self, item_id: int, source: Path, target: Path, outcome: Callable[[], None]) -> None:
+        identity = file_identity(source)
         with self._ledger.transaction():
             self._record_last_outcome()
-            self._ledger.record_target(item_id, target)
+            self._ledger.record_target(item_id, target, identity)
         self._last_outcome = outcome
         target.parent.mkdir(parents=True, exist_ok=True)
         source.rename(target)
+
+
+def file_identity(path: Path) -> str | None:
+    """Size and mtime guard against a filesystem that reuses a freed inode number for a
+    new file, as ext4 does."""
+    try:
+        stat = path.stat()
+    except OSError:
+        return None
+    return f"{stat.st_dev}:{stat.st_ino}:{stat.st_size}:{stat.st_mtime_ns}"
 
 
 def _parse_time(value: str | None) -> datetime | None:
@@ -569,4 +587,5 @@ def _row_to_item(row: sqlite3.Row) -> Item:
         dest_path=row["dest_path"],
         triage_reason=row["triage_reason"],
         target_path=row["target_path"],
+        target_identity=row["target_identity"],
     )

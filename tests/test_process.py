@@ -372,8 +372,11 @@ class TestKilledProcess:
         original = b"P" * 4096
         incoming = write_file(spool.incoming / "phone-1" / PHOTO, original)
         with closing(sqlite3.connect(spool.ledger_path)) as conn:
-            conn.executescript(SCHEMA.replace("  target_path   TEXT,\n", ""))
-            assert "target_path" not in {r[1] for r in conn.execute("PRAGMA table_info(items)")}
+            conn.executescript(
+                SCHEMA.replace("  target_path   TEXT,\n  target_identity TEXT,\n", "")
+            )
+            columns = {r[1] for r in conn.execute("PRAGMA table_info(items)")}
+            assert not {"target_path", "target_identity"} & columns
             conn.execute(
                 "INSERT INTO items (source_id, src_path, src_size, state, spool_path, "
                 "discovered_at, ingested_at) VALUES ('phone-1', ?, ?, 'ingested', ?, ?, ?)",
@@ -391,10 +394,6 @@ class TestKilledProcess:
 
 
 class TestAnotherFileAtARecordedTarget:
-    """A killed move whose spool copy then vanishes outside photocopier, with a different
-    photo of the same size at the recorded target. Size is not identity: the row must
-    stay unresolved, never delivered with the other photo's bytes."""
-
     def kill_the_first_move(self, config, spool: Spool, remote: Path, monkeypatch) -> Item:
         write_file(remote / CAMERA_ROLL / PHOTO, b"A" * 4096)
         run_ingest(config, spool)
@@ -405,7 +404,6 @@ class TestAnotherFileAtARecordedTarget:
         with Ledger(spool.ledger_path) as ledger:
             (item,) = ledger.items_in_state(State.INGESTED)
         assert item.target_path and item.spool_path
-        Path(item.spool_path).unlink()
         return item
 
     def state_of(self, spool: Spool, item: Item) -> State:
@@ -415,6 +413,7 @@ class TestAnotherFileAtARecordedTarget:
     def test_a_hand_copied_file_is_not_adopted(self, wired, monkeypatch) -> None:
         config, spool, nas, remote = wired
         item = self.kill_the_first_move(config, spool, remote, monkeypatch)
+        Path(str(item.spool_path)).unlink()
         write_file(Path(str(item.target_path)), b"Y" * 4096)
 
         pump(config, spool)
@@ -428,6 +427,7 @@ class TestAnotherFileAtARecordedTarget:
     ) -> None:
         config, spool, nas, remote = wired
         item = self.kill_the_first_move(config, spool, remote, monkeypatch)
+        Path(str(item.spool_path)).unlink()
         write_file(remote / CAMERA_ROLL / "2026/06/A/PXL_20260615_101500.jpg", b"Y" * 4096)
 
         pump(config, spool)

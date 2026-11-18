@@ -16,7 +16,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 
-from .ledger import Item, Ledger, Moves
+from .ledger import Item, Ledger, Moves, file_identity
 
 # Reasons are a closed set. A new reason is a deliberate change, not an ad-hoc string.
 NO_DATE = "no_date"
@@ -90,9 +90,7 @@ class Triage:
         with ledger.transaction():
             for item in ledger.items_moving():
                 target = Path(str(item.target_path))
-                still_at_source = item.spool_path and Path(item.spool_path).is_file()
-                arrived = target.is_file() and target.stat().st_size == item.src_size
-                if still_at_source or not arrived:
+                if file_identity(target) != item.target_identity:
                     continue
                 if self.root in target.parents:
                     reason = target.relative_to(self.root).parts[0]
