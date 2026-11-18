@@ -27,6 +27,7 @@ REPO = Path(__file__).resolve().parent.parent
 LAUNCHER = REPO / "scripts" / "photocopier-run.sh"
 CAMERA_ROLL = "Camera Roll"
 PHONE_2 = "Pictures/Camera Roll"
+PHONE_3 = "Phone 3/Camera Roll"
 VIDEO = "VID_20261116_093000.mp4"
 # Makes rclone's copy of this file fail, so ingest reports a failure on every pass.
 FAIL_VIDEO_COPY = {"FAKE_RCLONE_FAIL_ON": VIDEO}
@@ -187,6 +188,27 @@ def backdate_source(ledger_path: Path, source_id: str, days: int) -> None:
         conn.commit()
 
 
+def add_silent_phone_3(p: Pass, remote_root: Path) -> None:
+    """Configure a second phone that will go silent, so a summary that must name a silent
+    phone is also checked for naming the wrong one. Call before the first pass."""
+    populate(remote_root / PHONE_3, {"IMG_20261101_120000.jpg": 100})
+    p.cfg.write_text(
+        p.cfg.read_text(encoding="utf-8")
+        + f'\n[[source]]\nid = "phone-3"\npath = "{PHONE_3}"\nsuffix = "phone-3"\n',
+        encoding="utf-8",
+    )
+
+
+def assert_once_above_status(email: str, line: str) -> None:
+    """The warning is a whole line exactly once, above the STATUS block. STATUS pastes status
+    output, so a second copy there would show the operator the same warning twice."""
+    lines = email.splitlines()
+    copies = [i for i, text in enumerate(lines) if text == line]
+    assert len(copies) == 1, f"expected {line!r} once, found {len(copies)} time(s):\n{email}"
+    assert "STATUS" in lines, f"the summary has no STATUS block:\n{email}"
+    assert copies[0] < lines.index("STATUS"), f"{line!r} sits below STATUS:\n{email}"
+
+
 class TestLauncherFailureReporting:
     def test_failed_email_send_is_written_to_the_run_log(self, scheduled: Pass) -> None:
         scheduled.set_notify(ok=False)
@@ -222,22 +244,23 @@ class TestLauncherSilentSource:
         populate(remote_root / CAMERA_ROLL, {f"VID_{stamp}_090000.mp4": 100})
         email = scheduled.next_day_summary()
         assert scheduled.subjects()[-1].endswith("needs attention"), email
-        assert "\nWARNING: phone-2 has sent nothing for 16 days.\n" in email, (
-            f"phone-2 has sent nothing for 16 days while phone-1 uploads, yet:\n{email}"
-        )
+        assert_once_above_status(email, "WARNING: phone-2 has sent nothing for 16 days.")
         assert "WARNING: phone-1" not in email, f"phone-1 uploaded today, yet:\n{email}"
 
     def test_source_quiet_for_less_than_the_limit_is_not_flagged(
-        self, scheduled: Pass
+        self, scheduled: Pass, remote_root: Path
     ) -> None:
+        add_silent_phone_3(scheduled, remote_root)
         scheduled.run()
         backdate_source(scheduled.spool / "ledger.db", "phone-2", days=2)
-        scheduled.next_day_summary()
-        last = scheduled.subjects()[-1]
-        assert last.endswith("OK"), (
+        backdate_source(scheduled.spool / "ledger.db", "phone-3", days=16)
+        email = scheduled.next_day_summary()
+        assert scheduled.subjects()[-1].endswith("needs attention"), email
+        assert "WARNING: phone-2" not in email, (
             "phone-2 sent its last file 2 days ago, inside the 7 day limit, "
-            f"yet the summary says: {last}"
+            f"yet the summary names it:\n{email}"
         )
+        assert_once_above_status(email, "WARNING: phone-3 has sent nothing for 16 days.")
 
     def test_configured_source_that_never_sent_a_file_is_named(
         self, tmp_path: Path, remote_root: Path, spool_root: Path
@@ -248,9 +271,7 @@ class TestLauncherSilentSource:
         p.run()
         email = p.bodies()
         assert p.subjects()[-1].endswith("needs attention"), email
-        assert "\nWARNING: phone-2 has never sent a file.\n" in email, (
-            f"phone-2 is configured and has never uploaded a file, yet:\n{email}"
-        )
+        assert_once_above_status(email, "WARNING: phone-2 has never sent a file.")
 
     def test_malformed_limit_falls_back_to_the_default(self, scheduled: Pass) -> None:
         scheduled.run()
@@ -260,7 +281,7 @@ class TestLauncherSilentSource:
         assert len(scheduled.subjects()) == sent + 1, (
             "SOURCE_SILENT_DAYS=seven stopped the launcher before it sent the daily summary"
         )
-        assert "WARNING: phone-2 has sent nothing for 16 days." in email, email
+        assert_once_above_status(email, "WARNING: phone-2 has sent nothing for 16 days.")
         assert "SOURCE_SILENT_DAYS" in scheduled.run_log(), (
             "the launcher ignored a bad SOURCE_SILENT_DAYS without saying so in the run log"
         )
@@ -270,11 +291,15 @@ class TestLauncherSilentSource:
         scheduled.run()
         backdate_source(scheduled.spool / "ledger.db", "pixel|2", days=16)
         email = scheduled.next_day_summary()
-        assert "WARNING: pixel|2 has sent nothing for 16 days." in email, email
+        assert_once_above_status(email, "WARNING: pixel|2 has sent nothing for 16 days.")
 
-    def test_source_removed_from_the_config_is_not_named(self, scheduled: Pass) -> None:
+    def test_source_removed_from_the_config_is_not_named(
+        self, scheduled: Pass, remote_root: Path
+    ) -> None:
+        add_silent_phone_3(scheduled, remote_root)
         scheduled.run()
         backdate_source(scheduled.spool / "ledger.db", "phone-2", days=16)
+        backdate_source(scheduled.spool / "ledger.db", "phone-3", days=16)
         scheduled.edit_config(
             f'[[source]]\nid = "phone-2"\npath = "{PHONE_2}"\nsuffix = "phone-2"\n', ""
         )
@@ -282,6 +307,7 @@ class TestLauncherSilentSource:
         assert "WARNING: phone-2" not in email, (
             f"phone-2 was removed from config.toml, yet the summary still warns:\n{email}"
         )
+        assert_once_above_status(email, "WARNING: phone-3 has sent nothing for 16 days.")
 
     def test_backfill_of_an_old_file_does_not_hide_silence(
         self, tmp_path: Path, remote_root: Path, spool_root: Path
@@ -309,10 +335,7 @@ class TestLauncherSilentSource:
         )
 
         email = p.next_day_summary()
-        assert "WARNING: phone-2 has sent nothing for 16 days." in email, (
-            "phone-2 last uploaded 16 days ago; a backfill of a file it uploaded 20 days ago "
-            f"must not make it look active, yet:\n{email}"
-        )
+        assert_once_above_status(email, "WARNING: phone-2 has sent nothing for 16 days.")
 
     def test_silence_is_found_without_the_spool_variable(self, scheduled: Pass) -> None:
         scheduled.run()
@@ -322,7 +345,4 @@ class TestLauncherSilentSource:
         mark = len(scheduled.bodies())
         subprocess.run(["bash", str(LAUNCHER)], env=env, capture_output=True, timeout=300)
         email = scheduled.bodies()[mark:]
-        assert "WARNING: phone-2 has sent nothing for 16 days." in email, (
-            "the config names the spool, so silence must not depend on PHOTOCOPIER_SPOOL, "
-            f"yet:\n{email}"
-        )
+        assert_once_above_status(email, "WARNING: phone-2 has sent nothing for 16 days.")
