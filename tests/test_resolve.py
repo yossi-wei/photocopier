@@ -31,6 +31,7 @@ from photocopier.spool import Spool
 from photocopier.triage import DEST_CONFLICT, NO_DATE, Triage
 
 from .conftest import FAKE_RCLONE, FIXTURES, make_config, populate
+from .test_flush import SimulatedSigkill, kill_on_call
 
 CAMERA_ROLL = "Camera Roll"
 UNDATED = "no_date_anywhere/1J1A3188.jpg"
@@ -115,6 +116,22 @@ class TestList:
             assert render_pending(pending(ledger, Triage(spool.triage)), spool.triage) == (
                 "nothing in triage"
             )
+
+    def test_kill_while_triaging_still_lists_the_item(self, wired, monkeypatch) -> None:
+        config, spool, _nas, remote = wired
+        populate(remote / CAMERA_ROLL, {"undated/1J1A3188.jpg": 2048})
+        original = (remote / CAMERA_ROLL / "undated/1J1A3188.jpg").read_bytes()
+
+        kill_on_call(monkeypatch, Ledger, "mark_triaged")
+        with pytest.raises(SimulatedSigkill):
+            pump(config, spool)
+        for _ in range(2):
+            pump(config, spool)
+
+        with Ledger(spool.ledger_path) as ledger:
+            listed = [p for p in pending(ledger, Triage(spool.triage)) if p.present]
+        assert [p.item.src_path for p in listed] == ["undated/1J1A3188.jpg"]
+        assert listed[0].path.read_bytes() == original
 
 
 class TestFiled:

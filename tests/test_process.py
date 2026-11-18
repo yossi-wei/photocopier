@@ -14,7 +14,7 @@ from photocopier.spool import Spool
 from photocopier.triage import DEST_CONFLICT, NO_DATE, UNKNOWN_TYPE, Triage
 
 from .conftest import FIXTURES, make_config, populate
-from .test_flush import SimulatedSigkill, kill_on_call, nas_files, run_flush
+from .test_flush import PHOTO, STAGED, SimulatedSigkill, kill_on_call, nas_files, run_flush
 
 CAMERA_ROLL = "Camera Roll"
 
@@ -276,6 +276,28 @@ class TestStrayIncoming:
         run_process(config, spool)
 
         assert orphan.is_file()
+
+
+class TestKilledProcess:
+    def scheduled_pass(self, config, spool: Spool):
+        run_ingest(config, spool)
+        result = run_process(config, spool)
+        run_flush(config, spool)
+        return result
+
+    def test_kill_after_rename_before_ledger_still_delivers(self, wired, monkeypatch) -> None:
+        config, spool, nas, remote = wired
+        populate(remote / CAMERA_ROLL, {PHOTO: 4096})
+        original = (remote / CAMERA_ROLL / PHOTO).read_bytes()
+        run_ingest(config, spool)
+
+        kill_on_call(monkeypatch, Ledger, "mark_processed")
+        with pytest.raises(SimulatedSigkill):
+            run_process(config, spool)
+        passes = [self.scheduled_pass(config, spool) for _ in range(3)]
+
+        assert [len(p.missing) for p in passes] == [0, 0, 0]
+        assert (nas / STAGED).read_bytes() == original
 
 
 class TestIdempotency:

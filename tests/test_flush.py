@@ -433,6 +433,25 @@ class TestKilledFlush:
         assert ledger_states(spool) == [State.DELIVERED]
         assert outbox_files(spool) == set()
 
+    def test_kill_while_triaging_a_conflict_still_lists_it(self, wired, monkeypatch) -> None:
+        config, spool, nas, remote = wired
+        populate(remote / CAMERA_ROLL, {PHOTO: 4096})
+        original = (remote / CAMERA_ROLL / PHOTO).read_bytes()
+        pump(config, spool)
+        write_file(nas / STAGED, b"a different photo already filed by hand")
+
+        kill_on_call(monkeypatch, Ledger, "mark_triaged")
+        with pytest.raises(SimulatedSigkill):
+            run_flush(config, spool)
+        flushes = [scheduled_pass(config, spool) for _ in range(2)]
+
+        assert [len(f.missing) for f in flushes] == [0, 0]
+        assert (nas / STAGED).read_bytes() == b"a different photo already filed by hand"
+        with Ledger(spool.ledger_path) as ledger:
+            listed = [p for p in pending(ledger, Triage(spool.triage)) if p.present]
+        assert [p.item.src_path for p in listed] == [PHOTO]
+        assert listed[0].path.read_bytes() == original
+
 
 class TestIdenticalCopies:
     A = "2026/06/a/PXL_20260615_101500.jpg"
