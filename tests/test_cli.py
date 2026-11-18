@@ -498,10 +498,20 @@ suffix = "phone-2"
             encoding="utf-8",
         )
         self.notify.chmod(0o755)
+        # The launcher wraps each step in macOS's caffeinate, which Linux runners lack.
+        self.shims = tmp_path / "shims"
+        self.shims.mkdir()
+        (self.shims / "caffeinate").write_text(
+            "#!/bin/sh\n"
+            'while [ "${1#-}" != "$1" ]; do shift; done\n'
+            'exec "$@"\n',
+            encoding="utf-8",
+        )
+        (self.shims / "caffeinate").chmod(0o755)
 
     def env(self, extra: dict[str, str] | None = None) -> dict[str, str]:
         env = {
-            "PATH": os.environ["PATH"],
+            "PATH": f"{self.shims}{os.pathsep}{os.environ['PATH']}",
             "HOME": str(self.root),
             "PYTHONPATH": str(REPO),
             "FAKE_RCLONE_ROOT": str(self.remote_root),
