@@ -48,6 +48,9 @@ class SourceResult:
     failed: list[tuple[RemoteItem, str]] = field(default_factory=list)
     capped: bool = False
     listing_error: str | None = None
+    # Files the remote listed with no hash. Identity is (source, path, hash), so a re-upload
+    # of one at the same path would look already known. See D15.
+    hashless: int = 0
 
     @property
     def selected_bytes(self) -> int:
@@ -161,6 +164,7 @@ def ingest_source(
             result.skipped_until += 1
             continue
         candidates.append(item)
+    result.hashless = sum(1 for item in candidates if not item.hash)
 
     unseen = ledger.filter_new(source.id, candidates)
     result.already_known = len(candidates) - len(unseen)
@@ -283,6 +287,11 @@ def render(result: IngestResult, spool: Spool) -> str:
             lines.append(f"    {len(source.failed)} failed, will retry next run")
         if source.capped:
             lines.append("    stopped early: spool cap reached")
+        if source.hashless:
+            lines.append(
+                f"    WARNING: {source.hashless} file(s) listed with no hash, so a re-upload "
+                "at the same path would be missed (D15)"
+            )
 
     total = result.total_selected if result.dry_run else result.total_ingested
     total_bytes = result.selected_bytes if result.dry_run else result.total_bytes

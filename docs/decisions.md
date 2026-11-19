@@ -394,3 +394,15 @@ before the cutoff came down on purpose, through an `ingest --since` window (D12)
 filed as before. A file whose name dates it on or after the cutoff but whose EXIF is
 earlier is filed by EXIF, the disagreement D12 already accepts.
 
+## D15 — A listing without hashes is warned about, not re-keyed
+
+**Context.** Item identity is (source, path, hash) (D6). A remote that reports no hash
+gives every file an empty hash, so a re-upload with new bytes at the same path looks
+already known and is never fetched.
+
+**Decision.** Warn, decided by the operator on 2026-11-18. Ingest names each source whose
+listing has files with no hash. OneDrive always reports one, and none of the 4,167 rows
+in the live ledger is hashless, so re-keying such items by size and modification time
+would change ledger identity for no current user. If a hashless remote is ever added, that
+is the moment to revisit D6.
+
