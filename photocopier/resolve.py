@@ -22,7 +22,7 @@ from .config import Config, expand
 from .errors import GuardError, LedgerError
 from .flush import destination_root
 from .guards import check_mount_live
-from .layout import PHOTOS, VIDEO, same_content
+from .layout import PHOTOS, VIDEO, file_digest, same_content
 from .ledger import Item, Ledger, State
 from .spool import Spool
 from .triage import Triage, TriageEntry
@@ -127,7 +127,7 @@ def resolve_filed(
         )
 
     if not dry_run:
-        ledger.mark_delivered(item.id, dest_path=dest_path)
+        ledger.mark_delivered(item.id, dest_path=dest_path, dest_sha256=file_digest(target))
         _remove(copy, spool.triage)
     return Resolution(item, FILED, copy, dest_path=dest_path, dry_run=dry_run)
 

@@ -17,6 +17,7 @@ from photocopier.cli import main
 from photocopier.errors import GuardError, LedgerError
 from photocopier.flush import flush
 from photocopier.ingest import ingest
+from photocopier.layout import file_digest
 from photocopier.ledger import Ledger, State
 from photocopier.process import process
 from photocopier.rclone import Rclone
@@ -192,6 +193,7 @@ class TestFiled:
         assert not copy.exists()
         assert not (spool.triage / NO_DATE / "phone-1").exists(), "empty dirs are pruned"
         assert filed.is_file()
+        assert after["dest_sha256"] == file_digest(filed), "verify compares content later"
 
     def test_accepts_the_outbox_relative_form(self, wired) -> None:
         config, spool, nas, remote = wired

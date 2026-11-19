@@ -70,8 +70,9 @@ The [full decision log](docs/decisions.md) includes the reversals, which are the
 ## Success metrics
 
 Computed from the ledger by `photocopier status` — instrumented, not aspirational.
-`status --verify` also checks that every delivered file is still on the NAS at the size it
-arrived.
+`status --verify` also checks that every delivered file is still on the NAS with the bytes
+it arrived with (files delivered before content hashes were kept are checked by size until
+`status --verify --backfill-hashes` hashes them once). It reads each file in full.
 
 | Metric | Baseline | Target |
 |---|---|---|

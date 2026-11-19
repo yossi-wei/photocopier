@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import sqlite3
+from contextlib import closing
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 
@@ -10,7 +12,7 @@ import pytest
 from photocopier.errors import GuardError
 from photocopier.flush import flush
 from photocopier.ingest import ingest
-from photocopier.ledger import Ledger, Run, State
+from photocopier.ledger import SCHEMA_VERSION, Ledger, Run, State
 from photocopier.metrics import (
     Metrics,
     Streak,
@@ -23,7 +25,8 @@ from photocopier.metrics import (
 from photocopier.process import process
 from photocopier.rclone import Rclone
 
-from .conftest import FIXTURES, populate
+from .conftest import FIXTURES, populate, write_file
+from .test_flush import pump, run_flush
 
 CAMERA_ROLL = "Camera Roll"
 TODAY = date(2026, 11, 10)
@@ -246,7 +249,7 @@ def test_upgrading_an_old_ledger_adds_the_runs_table(tmp_path: Path) -> None:
         version = ledger.conn.execute(
             "SELECT value FROM meta WHERE key = 'schema_version'"
         ).fetchone()[0]
-    assert version == "2"
+    assert version == str(SCHEMA_VERSION)
 
 
 @pytest.mark.parametrize(
@@ -261,3 +264,82 @@ def test_upgrading_an_old_ledger_adds_the_runs_table(tmp_path: Path) -> None:
 )
 def test_shares_never_round_to_a_false_zero_or_hundred(part: int, whole: int, shown: str) -> None:
     assert _share(part, whole) == shown
+
+
+class TestVerifyByContent:
+    """`status --verify` used to compare sizes only, so different bytes of the same length on
+    the NAS passed as intact."""
+
+    PHOTO = "Camera Roll/2026/06/PXL_20260615_101500.jpg"
+
+    def deliver(self, wired) -> Path:
+        config, spool, nas, remote = wired
+        write_file(remote / self.PHOTO, b"a" * 4096)
+        pump(config, spool)
+        run_flush(config, spool)
+        return next((nas / "photos").rglob("*.jpg"))
+
+    def verify(self, wired, **kwargs):
+        config, spool, _nas, _remote = wired
+        with Ledger(spool.ledger_path) as ledger:
+            return verify_delivered(config, ledger, **kwargs)
+
+    def forget_hashes(self, wired) -> None:
+        """Make the ledger look as it did before hashes were recorded."""
+        _config, spool, _nas, _remote = wired
+        with closing(sqlite3.connect(spool.ledger_path)) as conn:
+            conn.execute("UPDATE items SET dest_sha256 = NULL")
+            conn.commit()
+
+    def test_same_size_overwrite_is_reported_as_changed(self, wired) -> None:
+        delivered = self.deliver(wired)
+        delivered.write_bytes(b"b" * 4096)
+        verified = self.verify(wired)
+        assert verified.checked == 1
+        assert verified.changed == ["photos/2026/06/PXL_20260615_101500_phone-1.jpg"]
+
+    def test_untouched_file_passes_by_content(self, wired) -> None:
+        self.deliver(wired)
+        verified = self.verify(wired)
+        assert (verified.ok, verified.size_only) == (True, 0)
+
+    def test_rows_from_before_hashes_are_counted_as_size_only(self, wired) -> None:
+        self.deliver(wired)
+        self.forget_hashes(wired)
+        verified = self.verify(wired)
+        assert (verified.ok, verified.size_only) == (True, 1)
+        assert "size only  1 delivered" in "\n".join(render(compute_now(wired), verified))
+
+    def test_backfill_hashes_older_rows_once(self, wired) -> None:
+        delivered = self.deliver(wired)
+        self.forget_hashes(wired)
+        assert self.verify(wired, backfill=True).backfilled == 1
+        assert self.verify(wired).size_only == 0
+        delivered.write_bytes(b"b" * 4096)
+        assert self.verify(wired).changed, "a backfilled row is checked by content"
+
+    def test_backfill_skips_a_file_whose_size_already_differs(self, wired) -> None:
+        delivered = self.deliver(wired)
+        self.forget_hashes(wired)
+        delivered.write_bytes(b"b" * 10)
+        verified = self.verify(wired, backfill=True)
+        assert (len(verified.changed), verified.backfilled) == (1, 0)
+
+
+def compute_now(wired):
+    _config, spool, _nas, _remote = wired
+    with Ledger(spool.ledger_path) as ledger:
+        return compute(ledger)
+
+
+def test_ledger_without_the_hash_column_is_upgraded(tmp_path: Path) -> None:
+    from photocopier.ledger import SCHEMA
+
+    path = tmp_path / "ledger.db"
+    with closing(sqlite3.connect(path)) as conn:
+        conn.executescript(SCHEMA.replace("  dest_sha256   TEXT,\n", ""))
+        conn.commit()
+    with Ledger(path) as ledger:
+        columns = {row["name"] for row in ledger.conn.execute("PRAGMA table_info(items)")}
+    assert "dest_sha256" in columns
+

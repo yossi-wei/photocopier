@@ -71,8 +71,8 @@ def destination_root(config: Config, dest_path: str) -> Path:
     raise ValueError(f"unrecognised destination bucket in {dest_path!r}")
 
 
-def deliver_file(source: Path, target: Path) -> None:
-    """Copy, verify against a read-back hash, then move into place.
+def deliver_file(source: Path, target: Path) -> str:
+    """Copy, verify against a read-back hash, then move into place. Returns the hash.
 
     The temporary name means an interrupted transfer never leaves a plausible-looking
     file at the real path. Verification reads the destination copy rather than trusting
@@ -94,6 +94,7 @@ def deliver_file(source: Path, target: Path) -> None:
     except Exception:
         partial.unlink(missing_ok=True)
         raise
+    return expected
 
 
 def _prune_empty(root: Path, leaf: Path) -> None:
@@ -162,23 +163,24 @@ def flush_staged(
         return
 
     try:
-        deliver_file(source, target)
+        digest = deliver_file(source, target)
     except OSError as exc:
         for row in rows:
             result.failed.append((row, str(exc)))
             ledger.record_error(row.id, str(exc))
         return
 
-    _mark_delivered_then_reclaim(rows, source, spool, ledger)
+    _mark_delivered_then_reclaim(rows, source, spool, ledger, digest)
     result.delivered.append((item, target))
     result.already_there.extend(rows[1:])
 
 
 def _mark_delivered_then_reclaim(
-    rows: list[Item], source: Path, spool: Spool, ledger: Ledger
+    rows: list[Item], source: Path, spool: Spool, ledger: Ledger, digest: str | None = None
 ) -> None:
+    digest = digest or file_digest(source)
     for row in rows:
-        ledger.mark_delivered(row.id, dest_path=row.dest_path)
+        ledger.mark_delivered(row.id, dest_path=row.dest_path, dest_sha256=digest)
     source.unlink()
     _prune_empty(spool.outbox, source.parent)
 

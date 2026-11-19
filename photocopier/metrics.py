@@ -19,6 +19,7 @@ from datetime import UTC, date, datetime, timedelta, tzinfo
 from .config import Config
 from .flush import destination_root
 from .guards import check_mount_live
+from .layout import file_digest
 from .ledger import Ledger, Outcomes, Run, State
 
 # Set by the launcher, so a run can tell whether a person started it.
@@ -63,6 +64,9 @@ class VerifyResult:
     checked: int = 0
     missing: list[str] = field(default_factory=list)
     changed: list[str] = field(default_factory=list)
+    # Delivered before content hashes were recorded, so checked by size alone.
+    size_only: int = 0
+    backfilled: int = 0
 
     @property
     def ok(self) -> bool:
@@ -138,11 +142,14 @@ def silence_warnings(
     return lines
 
 
-def verify_delivered(config: Config, ledger: Ledger) -> VerifyResult:
-    """Check every delivered file is still at its destination, at the size it arrived.
+def verify_delivered(config: Config, ledger: Ledger, *, backfill: bool = False) -> VerifyResult:
+    """Check every delivered file is still at its destination, with the bytes it arrived with.
 
-    Read-only. Mount-guarded like flush, because an unmounted share's mount point is an
-    empty local folder and every file would look lost.
+    Rows with a stored hash are compared by content, which catches a same-size overwrite.
+    Older rows fall back to size. With `backfill`, a size-matching older row has its file's
+    hash stored, once, so later checks compare content. Reads the NAS and never writes it.
+    Mount-guarded like flush, because an unmounted share's mount point is an empty local
+    folder and every file would look lost.
     """
     check_mount_live(config.destination.mount_point, config.destination.mount_marker)
     result = VerifyResult()
@@ -155,6 +162,14 @@ def verify_delivered(config: Config, ledger: Ledger) -> VerifyResult:
             result.missing.append(item.dest_path)
         elif target.stat().st_size != item.src_size:
             result.changed.append(item.dest_path)
+        elif item.dest_sha256:
+            if file_digest(target) != item.dest_sha256:
+                result.changed.append(item.dest_path)
+        elif backfill:
+            ledger.record_dest_hash(item.id, file_digest(target))
+            result.backfilled += 1
+        else:
+            result.size_only += 1
     return result
 
 
@@ -205,6 +220,13 @@ def render(metrics: Metrics, verified: VerifyResult | None = None) -> list[str]:
             lines.append(f"    missing  {path}")
         for path in verified.changed[:5]:
             lines.append(f"    changed  {path}")
+        if verified.size_only:
+            lines.append(
+                f"    size only  {verified.size_only:,} delivered before content hashes were "
+                "kept; --backfill-hashes records them"
+            )
+        if verified.backfilled:
+            lines.append(f"    hashed     {verified.backfilled:,} older file(s) for later checks")
     return lines
 
 

@@ -20,7 +20,7 @@ from pathlib import Path
 from .errors import LedgerError
 from .rclone import RemoteItem
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 
 class State(StrEnum):
@@ -55,6 +55,7 @@ CREATE TABLE IF NOT EXISTS items (
   last_error    TEXT,
   target_path   TEXT,
   target_identity TEXT,
+  dest_sha256   TEXT,
   UNIQUE (source_id, src_path, src_hash)
 );
 
@@ -95,6 +96,9 @@ class Item:
     triage_reason: str | None = None
     target_path: str | None = None
     target_identity: str | None = None
+    # SHA-256 of the file as delivered, so `status --verify` can tell a same-size overwrite
+    # from the original. None for rows delivered before it was recorded.
+    dest_sha256: str | None = None
 
 
 @dataclass(frozen=True)
@@ -162,7 +166,7 @@ class Ledger:
         self._conn.execute("PRAGMA foreign_keys=ON")
         self._conn.executescript(SCHEMA)
         columns = {row["name"] for row in self._conn.execute("PRAGMA table_info(items)")}
-        for column in ("target_path", "target_identity"):
+        for column in ("target_path", "target_identity", "dest_sha256"):
             if column not in columns:
                 self._conn.execute(f"ALTER TABLE items ADD COLUMN {column} TEXT")
         self._conn.execute(
@@ -459,22 +463,31 @@ class Ledger:
                 ),
             )
 
-    def mark_delivered(self, item_id: int, *, dest_path: str) -> None:
+    def mark_delivered(self, item_id: int, *, dest_path: str, dest_sha256: str) -> None:
         """Record a file confirmed present and verified at its destination.
 
         spool_path is cleared: the item no longer occupies the spool, and this is what
         makes the emptied spool safe. The row remains as the memory that stops ingest
-        fetching the file again. See D1.
+        fetching the file again. See D1. dest_sha256 is the delivered bytes' hash, which
+        `status --verify` later compares against.
         """
         with self.transaction() as conn:
             conn.execute(
                 """
                 UPDATE items SET
-                  state = ?, spool_path = NULL, dest_path = ?,
+                  state = ?, spool_path = NULL, dest_path = ?, dest_sha256 = ?,
                   delivered_at = ?, last_error = NULL
                 WHERE id = ?
                 """,
-                (State.DELIVERED.value, dest_path, _now(), item_id),
+                (State.DELIVERED.value, dest_path, dest_sha256, _now(), item_id),
+            )
+
+    def record_dest_hash(self, item_id: int, dest_sha256: str) -> None:
+        """Store the hash of a file delivered before hashes were recorded."""
+        with self.transaction() as conn:
+            conn.execute(
+                "UPDATE items SET dest_sha256 = ? WHERE id = ? AND dest_sha256 IS NULL",
+                (dest_sha256, item_id),
             )
 
     def mark_discarded(self, item_id: int) -> None:
@@ -595,4 +608,5 @@ def _row_to_item(row: sqlite3.Row) -> Item:
         triage_reason=row["triage_reason"],
         target_path=row["target_path"],
         target_identity=row["target_identity"],
+        dest_sha256=row["dest_sha256"],
     )
