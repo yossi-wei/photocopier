@@ -280,6 +280,13 @@ class Ledger:
             oldest_undelivered=_parse_time(row["oldest"]),
         )
 
+    def newest_src_modtimes(self) -> dict[str, datetime]:
+        rows = self.conn.execute(
+            "SELECT source_id, MAX(src_modtime) AS newest FROM items "
+            "WHERE src_modtime != '' GROUP BY source_id"
+        )
+        return {row["source_id"]: _parse_time(row["newest"]) for row in rows}
+
     def runs(self, since: datetime | None = None) -> list[Run]:
         sql = "SELECT * FROM runs"
         params: list[object] = []

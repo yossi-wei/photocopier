@@ -11,9 +11,11 @@ from __future__ import annotations
 import os
 import shlex
 import shutil
+import sqlite3
 import subprocess
 import sys
-from datetime import date
+from contextlib import closing
+from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 
 import pytest
@@ -280,6 +282,37 @@ class TestStatusCommand:
 
         first = next(line for line in capsys.readouterr().out.splitlines() if "triaged" in line)
         assert first.split()[:2] == ["triaged", "0"]
+
+    def test_names_a_source_quiet_for_longer_than_the_limit(
+        self, config_file: Path, loaded: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        main(["-c", str(config_file), "ingest"])
+        main(["-c", str(config_file), "status", "--silent-days", "7"])
+        assert "WARNING" not in capsys.readouterr().out, "phone-1 uploaded just now"
+
+        uploaded = (datetime.now(UTC) - timedelta(days=10)).isoformat(timespec="seconds")
+        with closing(sqlite3.connect(config_file.parent / "spool" / "ledger.db")) as conn:
+            conn.execute("UPDATE items SET src_modtime = ?", (uploaded.replace("+00:00", "Z"),))
+            conn.commit()
+        assert main(["-c", str(config_file), "status", "--silent-days", "7"]) == 0
+        lines = capsys.readouterr().out.splitlines()
+        assert "WARNING: phone-1 has sent nothing for 10 days." in lines
+
+    def test_names_a_source_that_never_sent_a_file(
+        self, config_file: Path, remote_root: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        (remote_root / CAMERA_ROLL).mkdir()
+        main(["-c", str(config_file), "ingest"])
+        main(["-c", str(config_file), "status"])
+        assert "WARNING: phone-1 has never sent a file." in capsys.readouterr().out.splitlines()
+
+    @pytest.mark.parametrize("days", ["0", "-3", "seven", "1.5"])
+    def test_silent_days_must_be_a_positive_whole_number(
+        self, config_file: Path, days: str, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        with pytest.raises(SystemExit):
+            main(["-c", str(config_file), "status", "--silent-days", days])
+        assert "a whole number of days, 1 or more" in capsys.readouterr().err
 
 
 class TestRunRecording:
