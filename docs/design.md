@@ -200,8 +200,11 @@ Applied in stage 2, when the file is local:
 
 1. **EXIF `DateTimeOriginal`**, then `DateTimeDigitized`, then `DateTime`. Local time
    at capture, used as-is — no timezone arithmetic. See D10.
-2. **Filename pattern** — `PXL_YYYYMMDD_*`, `YYYYMMDD_HHMMSS`, `IMG_YYYYMMDD_*`.
-   Covers mp4, which carries no EXIF. Both current sources use these.
+2. **Filename pattern** — `PXL_YYYYMMDD_*`, `YYYYMMDD_HHMMSS`, `IMG_YYYYMMDD_*`, and
+   13-digit epoch milliseconds. Covers mp4, which carries no EXIF. Both current sources
+   use these. `PXL_YYYYMMDD_HHMMSS*` and epoch-ms names record a UTC instant, so they are
+   converted to the machine's zone before the date is taken. Every other form, including
+   a `PXL` name without a six-digit time, is taken as written. See the D10 addendum.
 3. **Source path** `YYYY/MM/` from the OneDrive tree.
 4. **Triage**, reason `no_date`.
 

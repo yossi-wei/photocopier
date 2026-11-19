@@ -154,6 +154,7 @@ class TestIngestCommand:
         assert main(["-c", str(config_file), "ingest", "--source", "nobody"]) == 1
         assert "unknown source" in capsys.readouterr().err
 
+    @pytest.mark.usefixtures("eastern")
     def test_window_is_reported(
         self, config_file: Path, loaded: Path, capsys: pytest.CaptureFixture[str]
     ) -> None:

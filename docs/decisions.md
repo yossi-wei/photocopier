@@ -217,7 +217,7 @@ otherwise corrupt command output.
 
 ---
 
-## D10 — EXIF is the top date tier, and no timezone maths is applied
+## D10 — EXIF is the top date tier, taken as local time
 
 **Context.** Files must be filed by the local date the photo was taken. EXIF, the
 filename, and the OneDrive source path all offer a date.
@@ -237,7 +237,9 @@ The manual filing was right and the filename tier was wrong, every time within t
 of a month boundary.
 
 **Decision.** EXIF `DateTimeOriginal` first, then `DateTimeDigitized`, then `DateTime`,
-then the filename, then the source path, then triage.
+then the filename, then the source path, then triage. EXIF and most filenames are taken
+as written. A Pixel name with a full time and an epoch-ms name are converted from UTC to
+the machine's zone first (see the addendum).
 
 **The useful non-finding.** `OffsetTimeOriginal` is present on 99% of the library, and
 is not used. EXIF datetimes are already local time at capture, which is exactly the
@@ -249,6 +251,33 @@ reproducible by anyone with a filed library, rather than being a number asserted
 commit message.
 
 ---
+
+**Addendum, 2026-11-17: Pixel and epoch-ms names are UTC instants.** The rule above
+covers EXIF and names already in local time. It does not cover two name forms that record
+a UTC instant: `PXL_YYYYMMDD_HHMMSSmmm` and 13-digit epoch milliseconds. Both are now
+converted to the machine's local zone before the date is taken. The zone is read at
+runtime, never hard-coded. A `PXL` name without a six-digit time after an underscore,
+such as `PXL_20260601_1127.jpg` or `PXL-20260601-112702768.jpg`, has no instant to
+convert, so it keeps the day as written. Every other filename pattern is still taken as
+written.
+
+Measured on the same 3720 EXIF-dated Pixel photos, from a read-only copy of the live
+ledger, with the machine in `America/New_York`:
+
+| Rule | Month agrees |
+|---|---|
+| Name read as UTC | 3714 of 3720 |
+| Name converted to local time | **3720 of 3720** |
+
+**Policy: the home zone, not the capture zone.** A file without EXIF does not record
+where it was taken, so the machine's zone stands in for the zone of capture. The table
+shows this is right for photos taken at home. It is wrong for a file taken abroad near
+midnight. A video shot at 01:00 on 1 January in London is 20:00 on 31 December in New
+York, so it is filed in the previous year. `test_home_zone_rule_files_a_video_shot_abroad_on_new_years_day_in_the_old_year`
+pins this behaviour.
+
+**Consequence.** The NAS port must set `TZ` to the library owner's zone. Without it, the
+NAS reads UTC and misfiles the six Pixel photos that the table counts as disagreeing.
 
 ## D11 — Triage is closed out by a command, never by editing the ledger
 

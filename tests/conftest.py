@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import os
+import time
+from collections.abc import Iterator
 from pathlib import Path
 
 import pytest
@@ -25,6 +27,19 @@ def clean_env(monkeypatch: pytest.MonkeyPatch) -> None:
         "FAKE_RCLONE_FAIL_ON",
     ):
         monkeypatch.delenv(name, raising=False)
+
+
+@pytest.fixture
+def eastern() -> Iterator[None]:
+    previous = os.environ.get("TZ")
+    os.environ["TZ"] = "America/New_York"
+    time.tzset()
+    yield
+    if previous is None:
+        del os.environ["TZ"]
+    else:
+        os.environ["TZ"] = previous
+    time.tzset()
 
 
 @pytest.fixture
