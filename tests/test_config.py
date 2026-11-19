@@ -167,3 +167,13 @@ def test_example_config_is_valid() -> None:
     cfg = config_module.load(example)
     assert len(cfg.sources) == 2
     assert {s.id for s in cfg.sources} == {"phone-1", "phone-2"}
+
+
+def test_list_timeout_defaults_to_fifteen_minutes() -> None:
+    assert from_dict(MINIMAL).rclone.list_timeout_s == 900
+
+
+@pytest.mark.parametrize("value", [0, -5, "900", True, 1.5])
+def test_list_timeout_must_be_a_positive_whole_number(value: object) -> None:
+    with pytest.raises(ConfigError, match="list_timeout_s"):
+        from_dict({**MINIMAL, "rclone": {**MINIMAL["rclone"], "list_timeout_s": value}})

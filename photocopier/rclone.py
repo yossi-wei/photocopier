@@ -81,25 +81,36 @@ class Rclone:
     def lsjson(self, source_path: str) -> list[RemoteItem]:
         """List every file under a source folder. Metadata only; downloads nothing."""
         target = f"{self.config.remote}:{source_path}"
-        proc = self._run(["lsjson", "--recursive", "--hash", target])
+        proc = self._run(
+            ["lsjson", "--recursive", "--hash", target], timeout=self.config.list_timeout_s
+        )
         try:
             entries = json.loads(proc.stdout or "[]")
         except json.JSONDecodeError as exc:
             raise RcloneError(f"could not parse rclone lsjson output: {exc}") from exc
+        if not isinstance(entries, list):
+            raise RcloneError(f"rclone lsjson returned {type(entries).__name__}, not a list")
 
         items: list[RemoteItem] = []
         for entry in entries:
-            if entry.get("IsDir"):
-                continue
-            items.append(
-                RemoteItem(
-                    path=entry["Path"],
-                    name=entry.get("Name") or Path(entry["Path"]).name,
-                    size=int(entry.get("Size") or 0),
-                    mod_time=str(entry.get("ModTime") or ""),
-                    hash=_extract_hash(entry.get("Hashes") or {}),
+            try:
+                if entry.get("IsDir"):
+                    continue
+                items.append(
+                    RemoteItem(
+                        path=str(entry["Path"]),
+                        name=entry.get("Name") or Path(entry["Path"]).name,
+                        size=int(entry.get("Size") or 0),
+                        mod_time=str(entry.get("ModTime") or ""),
+                        hash=_extract_hash(entry.get("Hashes") or {}),
+                    )
                 )
-            )
+            except (AttributeError, KeyError, TypeError, ValueError) as exc:
+                # One unreadable entry fails this source's listing, not the whole run.
+                shown = json.dumps(entry, ensure_ascii=False, default=str)[:200]
+                raise RcloneError(
+                    f"unexpected rclone lsjson entry ({type(exc).__name__}: {exc}): {shown}"
+                ) from exc
         return items
 
     def copy_files(self, source_path: str, dest_dir: Path, rel_paths: list[str]) -> None:
