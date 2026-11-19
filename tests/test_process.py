@@ -14,7 +14,14 @@ from photocopier.ledger import SCHEMA, Item, Ledger, State
 from photocopier.process import process
 from photocopier.rclone import Rclone
 from photocopier.spool import Spool
-from photocopier.triage import DEST_CONFLICT, NO_DATE, UNKNOWN_TYPE, UNTRACKED, Triage
+from photocopier.triage import (
+    BEFORE_CUTOFF,
+    DEST_CONFLICT,
+    NO_DATE,
+    UNKNOWN_TYPE,
+    UNTRACKED,
+    Triage,
+)
 
 from .conftest import FIXTURES, make_config, populate, write_file
 from .test_flush import (
@@ -614,3 +621,70 @@ def test_triage_leaves_no_empty_directories(config, spool: Spool, remote_root: P
 
     assert not (spool.incoming / "phone-1" / "1969").exists()
     assert not (spool.incoming / "phone-1").exists()
+
+
+class TestCutoffOnTheResolvedDate:
+    """A file whose name and folder carry no date cannot be skipped by ingest's cutoff, so
+    one whose EXIF predates the cutoff used to be filed anyway (D14)."""
+
+    CUTOFF = "2026-11-01"
+    EXIF_OCT_31 = "PXL_20261101_021009424.jpg"  # EXIF DateTimeOriginal 2026-10-31
+
+    @pytest.fixture
+    def with_cutoff(self, spool_root: Path):
+        config = make_config(spool_root, sources=[
+            {"id": "phone-1", "path": CAMERA_ROLL, "suffix": "phone-1", "cutoff": self.CUTOFF},
+        ])
+        spool = Spool.from_config(config.spool)
+        spool.ensure()
+        return config, spool
+
+    def test_undated_name_with_exif_before_the_cutoff_is_triaged(
+        self, with_cutoff, remote_root: Path
+    ) -> None:
+        config, spool = with_cutoff
+        place(remote_root, "2026/edited.jpg", self.EXIF_OCT_31)
+        run_ingest(config, spool)
+
+        result = run_process(config, spool)
+
+        assert outbox_files(spool) == set()
+        assert [reason for _item, reason in result.triaged] == [BEFORE_CUTOFF]
+        assert (spool.triage / BEFORE_CUTOFF / "phone-1" / "2026/edited.jpg").is_file()
+        entry = Triage(spool.triage).entries()[-1]
+        assert entry.detail == "exif dates it 2026-10-31, before the 2026-11-01 cutoff"
+
+    def test_undated_name_with_exif_after_the_cutoff_is_filed(
+        self, spool_root: Path, remote_root: Path
+    ) -> None:
+        config = make_config(spool_root, sources=[
+            {"id": "phone-1", "path": CAMERA_ROLL, "suffix": "phone-1", "cutoff": "2026-10-01"},
+        ])
+        spool = Spool.from_config(config.spool)
+        spool.ensure()
+        place(remote_root, "2026/edited.jpg", self.EXIF_OCT_31)
+        run_ingest(config, spool)
+        run_process(config, spool)
+        assert outbox_files(spool) == {"photos/2026/10/edited_phone-1.jpg"}
+
+    def test_window_backfill_of_a_named_file_is_still_filed(
+        self, with_cutoff, remote_root: Path
+    ) -> None:
+        """`ingest --since` pulls files from before the cutoff on purpose (D12)."""
+        from datetime import date
+
+        from photocopier.ingest import ingest
+
+        config, spool = with_cutoff
+        place(remote_root, "IMG_20261031_120000.jpg", self.EXIF_OCT_31)
+        with Ledger(spool.ledger_path) as ledger:
+            ingest(config, Rclone(config.rclone), ledger, spool, since=date(2026, 10, 1))
+        result = run_process(config, spool)
+        assert result.triaged == []
+        assert outbox_files(spool) == {"photos/2026/10/IMG_20261031_120000_phone-1.jpg"}
+
+    def test_no_cutoff_files_it(self, config, spool: Spool, remote_root: Path) -> None:
+        place(remote_root, "2026/edited.jpg", self.EXIF_OCT_31)
+        run_ingest(config, spool)
+        run_process(config, spool)
+        assert outbox_files(spool) == {"photos/2026/10/edited_phone-1.jpg"}

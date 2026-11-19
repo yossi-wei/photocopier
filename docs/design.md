@@ -232,6 +232,7 @@ zeroed timestamps. These must land in triage, not in `photos/1969/`.
 | video ext, date resolved | `video/YYYY/<stem>_<suffix>.<ext>` |
 | no date | `triage/no_date/` |
 | unknown ext | `triage/unknown_type/` |
+| EXIF before the cutoff, no date in name or folder | `triage/before_cutoff/` (D14) |
 | in `incoming/` with no ledger row | `triage/untracked/` |
 
 ### Conflict policy at the destination
@@ -263,6 +264,7 @@ triage/
   dest_conflict/
   unknown_type/
   untracked/
+  before_cutoff/
   manifest.json
 ```
 
