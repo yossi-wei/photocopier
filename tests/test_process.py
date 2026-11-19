@@ -3,18 +3,28 @@
 from __future__ import annotations
 
 import shutil
+import sqlite3
+from contextlib import closing
 from pathlib import Path
 
 import pytest
 
-from photocopier.ledger import Ledger, State
+from photocopier.ledger import SCHEMA, Item, Ledger, State
 from photocopier.process import process
 from photocopier.rclone import Rclone
 from photocopier.spool import Spool
 from photocopier.triage import DEST_CONFLICT, NO_DATE, UNKNOWN_TYPE, Triage
 
-from .conftest import FIXTURES, make_config, populate
-from .test_flush import SimulatedSigkill, kill_on_call, nas_files, run_flush
+from .conftest import FIXTURES, make_config, populate, write_file
+from .test_flush import (
+    PHOTO,
+    STAGED,
+    SimulatedSigkill,
+    kill_on_call,
+    nas_files,
+    pump,
+    run_flush,
+)
 
 CAMERA_ROLL = "Camera Roll"
 
@@ -276,6 +286,158 @@ class TestStrayIncoming:
         run_process(config, spool)
 
         assert orphan.is_file()
+
+
+class TestKilledProcess:
+    def scheduled_pass(self, config, spool: Spool):
+        run_ingest(config, spool)
+        result = run_process(config, spool)
+        run_flush(config, spool)
+        return result
+
+    def test_kill_after_rename_before_ledger_still_delivers(self, wired, monkeypatch) -> None:
+        config, spool, nas, remote = wired
+        populate(remote / CAMERA_ROLL, {PHOTO: 4096})
+        original = (remote / CAMERA_ROLL / PHOTO).read_bytes()
+        run_ingest(config, spool)
+
+        kill_on_call(monkeypatch, Ledger, "mark_processed")
+        with pytest.raises(SimulatedSigkill):
+            run_process(config, spool)
+        passes = [self.scheduled_pass(config, spool) for _ in range(3)]
+
+        assert [len(p.missing) for p in passes] == [0, 0, 0]
+        assert (nas / STAGED).read_bytes() == original
+
+    @pytest.mark.parametrize(
+        ("owner", "step"), [(Ledger, "record_target"), (Path, "rename")]
+    )
+    def test_kill_before_the_rename_converges(self, wired, monkeypatch, owner, step) -> None:
+        config, spool, nas, remote = wired
+        populate(remote / CAMERA_ROLL, {PHOTO: 4096})
+        original = (remote / CAMERA_ROLL / PHOTO).read_bytes()
+        run_ingest(config, spool)
+
+        kill_on_call(monkeypatch, owner, step)
+        with pytest.raises(SimulatedSigkill):
+            run_process(config, spool)
+        result = self.scheduled_pass(config, spool)
+
+        assert len(result.filed) == 1 and not result.missing
+        assert (nas / STAGED).read_bytes() == original
+        assert not (spool.incoming / "phone-1").exists()
+
+    def test_kill_while_filing_a_copy_of_a_delivered_photo_converges(
+        self, wired, monkeypatch
+    ) -> None:
+        config, spool, nas, remote = wired
+        same = b"S" * 4096
+        write_file(remote / CAMERA_ROLL / "2026/06/a/PXL_20260615_101500.jpg", same)
+        self.scheduled_pass(config, spool)
+        write_file(remote / CAMERA_ROLL / "2026/06/b/PXL_20260615_101500.jpg", same)
+        run_ingest(config, spool)
+
+        kill_on_call(monkeypatch, Ledger, "mark_processed")
+        with pytest.raises(SimulatedSigkill):
+            run_process(config, spool)
+        run_flush(config, spool)
+        result = self.scheduled_pass(config, spool)
+
+        assert not result.missing
+        assert (nas / STAGED).read_bytes() == same
+        with Ledger(spool.ledger_path) as ledger:
+            assert ledger.count_in_state(State.DELIVERED) == 2
+
+    def test_dry_run_after_a_kill_reports_the_file_and_moves_nothing(
+        self, wired, monkeypatch
+    ) -> None:
+        config, spool, _nas, remote = wired
+        populate(remote / CAMERA_ROLL, {PHOTO: 4096})
+        run_ingest(config, spool)
+        kill_on_call(monkeypatch, Ledger, "mark_processed")
+        with pytest.raises(SimulatedSigkill):
+            run_process(config, spool)
+
+        result = run_process(config, spool, dry_run=True)
+
+        assert len(result.filed) == 1 and not result.missing
+        assert outbox_files(spool) == {STAGED}
+        with Ledger(spool.ledger_path) as ledger:
+            assert ledger.count_in_state(State.INGESTED) == 1
+
+    def test_ledger_from_an_older_build_is_upgraded_and_recovers(
+        self, wired, monkeypatch
+    ) -> None:
+        config, spool, nas, _remote = wired
+        original = b"P" * 4096
+        incoming = write_file(spool.incoming / "phone-1" / PHOTO, original)
+        with closing(sqlite3.connect(spool.ledger_path)) as conn:
+            conn.executescript(
+                SCHEMA.replace("  target_path   TEXT,\n  target_identity TEXT,\n", "")
+            )
+            columns = {r[1] for r in conn.execute("PRAGMA table_info(items)")}
+            assert not {"target_path", "target_identity"} & columns
+            conn.execute(
+                "INSERT INTO items (source_id, src_path, src_size, state, spool_path, "
+                "discovered_at, ingested_at) VALUES ('phone-1', ?, ?, 'ingested', ?, ?, ?)",
+                (PHOTO, len(original), str(incoming), "2026-11-01", "2026-11-01"),
+            )
+            conn.commit()
+
+        kill_on_call(monkeypatch, Ledger, "mark_processed")
+        with pytest.raises(SimulatedSigkill):
+            run_process(config, spool)
+        result = self.scheduled_pass(config, spool)
+
+        assert not result.missing
+        assert (nas / STAGED).read_bytes() == original
+
+
+class TestAnotherFileAtARecordedTarget:
+    def kill_the_first_move(self, config, spool: Spool, remote: Path, monkeypatch) -> Item:
+        write_file(remote / CAMERA_ROLL / PHOTO, b"A" * 4096)
+        run_ingest(config, spool)
+        with monkeypatch.context() as patch:
+            kill_on_call(patch, Path, "rename")
+            with pytest.raises(SimulatedSigkill):
+                run_process(config, spool)
+        with Ledger(spool.ledger_path) as ledger:
+            (item,) = ledger.items_in_state(State.INGESTED)
+        assert item.target_path and item.spool_path
+        return item
+
+    def state_of(self, spool: Spool, item: Item) -> State:
+        with Ledger(spool.ledger_path) as ledger:
+            return ledger.get(item.id).state
+
+    def test_a_hand_copied_file_is_not_adopted(self, wired, monkeypatch) -> None:
+        config, spool, nas, remote = wired
+        item = self.kill_the_first_move(config, spool, remote, monkeypatch)
+        Path(str(item.spool_path)).unlink()
+        write_file(Path(str(item.target_path)), b"Y" * 4096)
+
+        pump(config, spool)
+        run_flush(config, spool)
+
+        assert self.state_of(spool, item) == State.INGESTED
+        assert not (nas / STAGED).exists()
+
+    def test_a_later_photo_for_the_same_destination_is_not_adopted(
+        self, wired, monkeypatch
+    ) -> None:
+        config, spool, nas, remote = wired
+        item = self.kill_the_first_move(config, spool, remote, monkeypatch)
+        Path(str(item.spool_path)).unlink()
+        write_file(remote / CAMERA_ROLL / "2026/06/A/PXL_20260615_101500.jpg", b"Y" * 4096)
+
+        pump(config, spool)
+        pump(config, spool)
+        run_flush(config, spool)
+
+        assert self.state_of(spool, item) == State.INGESTED
+        assert (nas / STAGED).read_bytes() == b"Y" * 4096
+        with Ledger(spool.ledger_path) as ledger:
+            assert ledger.count_in_state(State.DELIVERED) == 1
 
 
 class TestIdempotency:
