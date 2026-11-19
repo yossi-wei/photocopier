@@ -109,7 +109,10 @@ scheduler needs it, and is configured only through environment variables (see it
 - puts a time limit on every step;
 - emails (through `NOTIFY_CMD`) at most one failure message per 24 hours for the same
   failure, plus one summary the first time it runs on each calendar day (local time), which
-  flags failures, triaged files, and undelivered files older than `BACKLOG_WARN_DAYS`.
+  flags failures, triaged files, undelivered files older than `BACKLOG_WARN_DAYS`, and each
+  configured phone that has never sent a file or has sent nothing for more than
+  `SOURCE_SILENT_DAYS` days (7). `photocopier status --silent-days N` prints the same
+  warnings by hand.
 
 macOS refuses to let launchd read `~/Documents`, so schedule an installed copy, not the
 checkout: install the package into a venv outside it (`uv venv ~/.local/share/photocopier/venv`,

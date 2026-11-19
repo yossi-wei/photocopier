@@ -29,6 +29,8 @@ RECORDED_COMMANDS = ("ingest", "process", "flush", "resolve")
 
 WINDOW_DAYS = 30
 
+SILENT_DAYS = 7
+
 
 @dataclass(frozen=True)
 class Streak:
@@ -48,6 +50,12 @@ class Metrics:
     @property
     def total_interventions(self) -> int:
         return sum(self.interventions.values())
+
+
+@dataclass(frozen=True)
+class SourceActivity:
+    source_id: str
+    newest_modtime: datetime | None
 
 
 @dataclass
@@ -111,6 +119,23 @@ def compute(ledger: Ledger, *, now: datetime | None = None, tz: tzinfo | None = 
         ),
         now=now,
     )
+
+
+def source_activity(config: Config, ledger: Ledger) -> list[SourceActivity]:
+    newest = ledger.newest_src_modtimes()
+    return [SourceActivity(source.id, newest.get(source.id)) for source in config.sources]
+
+
+def silence_warnings(
+    activity: list[SourceActivity], *, now: datetime, silent_days: int
+) -> list[str]:
+    lines = []
+    for source in activity:
+        if source.newest_modtime is None:
+            lines.append(f"WARNING: {source.source_id} has never sent a file.")
+        elif (quiet := now - source.newest_modtime) > timedelta(days=silent_days):
+            lines.append(f"WARNING: {source.source_id} has sent nothing for {_days(quiet.days)}.")
+    return lines
 
 
 def verify_delivered(config: Config, ledger: Ledger) -> VerifyResult:
