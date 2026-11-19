@@ -19,6 +19,8 @@
 #   BACKLOG_WARN_DAYS   warn in the summary when undelivered files are older than this (3)
 #   SOURCE_SILENT_DAYS  warn in the summary when a source has sent nothing for more days (7)
 #   LOCK_ALERT_HOURS    email once a day when another job has held the lock this long (24)
+#   STATUS_TIMEOUT      seconds the reporting `status` call may take (300)
+#   STEP_KILL_GRACE     seconds a timed-out step gets to stop before it is killed (30)
 #   PHOTOCOPIER_DRY_RUN set to 1 to pass --dry-run to every step and send no email ()
 #
 # Always exits 0 unless it cannot start; problems are reported by email and in the log.
@@ -37,6 +39,8 @@ NAS_MOUNT_TRIES="${NAS_MOUNT_TRIES:-3}"
 LOCK_ALERT_HOURS="${LOCK_ALERT_HOURS:-24}"
 [[ "$LOCK_ALERT_HOURS" =~ ^[0-9]+$ ]] || LOCK_ALERT_HOURS=24
 NAS_MOUNT_WAIT="${NAS_MOUNT_WAIT:-15}"
+STATUS_TIMEOUT="${STATUS_TIMEOUT:-300}"
+STEP_KILL_GRACE="${STEP_KILL_GRACE:-30}"
 DRY="${PHOTOCOPIER_DRY_RUN:-}"
 dry=(); [ "$DRY" = 1 ] && dry=(--dry-run)
 # Marks every step as scheduled in the ledger's runs table, for the unattended streak (D13).
@@ -53,9 +57,40 @@ elif [ -n "$SOURCE_SILENT_DAYS" ]; then
   log "SOURCE_SILENT_DAYS=\"$SOURCE_SILENT_DAYS\" is not a whole number of days, 1 or more; using the default"
 fi
 
+for knob in STATUS_TIMEOUT:300 STEP_KILL_GRACE:30; do
+  name="${knob%%:*}"
+  [[ "${!name}" =~ ^[1-9][0-9]*$ ]] && continue
+  log "$name=\"${!name}\" is not a whole number of seconds, 1 or more; using the default"
+  printf -v "$name" '%s' "${knob#*:}"
+done
+
 [ -x "$BIN" ] || { echo "photocopier not found at $BIN" >&2; exit 127; }
 
 with_timeout() { local secs="$1"; shift; perl -e 'alarm shift; exec @ARGV' "$secs" "$@"; }
+# Runs a command in its own process group under a time limit. On timeout the whole group
+# gets TERM, then KILL after STEP_KILL_GRACE seconds, so rclone dies with photocopier
+# instead of copying on after the lock is released. Exits 142 on timeout, as an alarm
+# would, and otherwise with the command's own status.
+LIMIT_PL='
+  my ($secs, $grace) = (shift, shift);
+  my $pid = fork() // die "fork: $!";
+  if ($pid == 0) { setpgrp(0, 0); exec @ARGV or exit 127; }
+  my $timed_out = 0;
+  $SIG{ALRM} = sub {
+    if ($timed_out++) { kill "KILL", -$pid } else { kill "TERM", -$pid; alarm $grace }
+  };
+  alarm $secs;
+  1 while waitpid($pid, 0) == -1 && $!{EINTR};
+  my $status = $?;
+  alarm 0;
+  if ($timed_out) {
+    for (1 .. $grace) { last unless kill 0, -$pid; sleep 1 }
+    kill "KILL", -$pid;
+    exit 142;
+  }
+  exit($status & 127 ? 128 + ($status & 127) : $status >> 8);
+'
+run_limited() { perl -e "$LIMIT_PL" "$@"; }
 notify() {
   [ -n "$NOTIFY_CMD" ] && [ "$DRY" != 1 ] || return 1
   local rc=0
@@ -166,7 +201,7 @@ step() {  # name, timeout seconds, args...
   local name="$1" secs="$2"; shift 2
   log "== $name"
   local out rc=0
-  out="$(caffeinate -i perl -e 'alarm shift; exec @ARGV' "$secs" "$BIN" "$@" 2>&1)" || rc=$?
+  out="$(caffeinate -i perl -e "$LIMIT_PL" "$secs" "$STEP_KILL_GRACE" "$BIN" "$@" 2>&1)" || rc=$?
   printf '%s\n' "$out" | tee -a "$run_log" >/dev/null
   step_out+="[$name]"$'\n'"$out"$'\n\n'
   if [ "$rc" -eq 142 ]; then failures+=("$name timed out after ${secs}s")
@@ -182,8 +217,10 @@ else
 fi
 
 # -- reporting ------------------------------------------------------------------------
-status_out="$("$BIN" status ${silent_days[@]+"${silent_days[@]}"} 2>&1)" ||
-  failures+=("status exited $?: $(printf '%s' "$status_out" | tail -2 | tr '\n' ' ')")
+status_rc=0
+status_out="$(run_limited "$STATUS_TIMEOUT" "$STEP_KILL_GRACE" "$BIN" status ${silent_days[@]+"${silent_days[@]}"} 2>&1)" || status_rc=$?
+if [ "$status_rc" -eq 142 ]; then failures+=("status timed out after ${STATUS_TIMEOUT}s")
+elif [ "$status_rc" -ne 0 ]; then failures+=("status exited $status_rc: $(printf '%s' "$status_out" | tail -2 | tr '\n' ' ')"); fi
 oldest=""
 if command -v sqlite3 >/dev/null && [ -f "$SPOOL/ledger.db" ]; then
   # Not -readonly: the ledger is in WAL mode, and a read-only connection cannot create the

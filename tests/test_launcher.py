@@ -9,9 +9,11 @@ points there too.
 
 from __future__ import annotations
 
+import contextlib
 import os
 import re
 import shlex
+import signal
 import sqlite3
 import subprocess
 import sys
@@ -460,3 +462,90 @@ class TestLauncherStaleLock:
         scheduled.run({"PHOTOCOPIER_DRY_RUN": "1"})
         assert scheduled.subjects() == []
         assert not (scheduled.state / "blocked-date").exists()
+
+
+def fake_bin(p: Pass, body: str) -> None:
+    """Replace the photocopier executable with a shell script, for steps that hang."""
+    p.bin.write_text("#!/bin/sh\n" + body, encoding="utf-8")
+    p.bin.chmod(0o755)
+
+
+def short_ingest_limit(tmp_path: Path, seconds: int = 2) -> Path:
+    """The launcher with its six-hour ingest limit cut to a few seconds."""
+    text = LAUNCHER.read_text(encoding="utf-8")
+    assert "step ingest  21600" in text, "setup: the ingest step line moved"
+    short = tmp_path / "photocopier-run-short.sh"
+    short.write_text(text.replace("step ingest  21600", f"step ingest  {seconds}"),
+                     encoding="utf-8")
+    return short
+
+
+def alive(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    return True
+
+
+class TestLauncherTimeouts:
+    def test_timed_out_step_leaves_no_child_running(
+        self, scheduled: Pass, tmp_path: Path
+    ) -> None:
+        """The alarm used to kill photocopier but not rclone under it, so a timed-out ingest
+        kept copying after the pass released the NAS lock."""
+        child_pid = tmp_path / "child.pid"
+        # rclone's pipes go to photocopier, not the launcher, so the child holds none of the
+        # launcher's output open.
+        fake_bin(
+            scheduled,
+            f'if [ "$1" = ingest ]; then sleep 60 >/dev/null 2>&1 & echo $! > {child_pid}; '
+            "wait; fi\nexit 0\n",
+        )
+        subprocess.run(["bash", str(short_ingest_limit(tmp_path))], env=scheduled.env(),
+                       capture_output=True, text=True, timeout=120)
+        pid = int(child_pid.read_text())
+        still_running = alive(pid)
+        with contextlib.suppress(ProcessLookupError):
+            os.kill(pid, signal.SIGKILL)
+        assert "ingest timed out after 2s" in scheduled.bodies(), scheduled.bodies()
+        assert not scheduled.lock.exists(), "setup: lock still held"
+        assert not still_running, "ingest's child outlived the pass that released the lock"
+
+    def test_step_that_ignores_term_is_killed_after_the_grace_period(
+        self, scheduled: Pass, tmp_path: Path
+    ) -> None:
+        fake_bin(scheduled, 'if [ "$1" = ingest ]; then trap "" TERM; sleep 60; fi\nexit 0\n')
+        start = time.monotonic()
+        subprocess.run(["bash", str(short_ingest_limit(tmp_path))],
+                       env=scheduled.env({"STEP_KILL_GRACE": "2"}),
+                       capture_output=True, text=True, timeout=120)
+        assert time.monotonic() - start < 30, "the step outlived its limit and grace period"
+        assert "ingest timed out after 2s" in scheduled.bodies()
+
+    def test_status_call_is_time_limited(self, scheduled: Pass) -> None:
+        """`photocopier status` ran with no limit, so a hung status held the lock forever."""
+        fake_bin(scheduled, 'if [ "$1" = status ]; then sleep 600; fi\nexit 0\n')
+        proc = subprocess.Popen(["bash", str(LAUNCHER)],
+                                env=scheduled.env({"STATUS_TIMEOUT": "2",
+                                                   "STEP_KILL_GRACE": "1"}),
+                                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                                start_new_session=True)
+        try:
+            proc.wait(timeout=30)
+        except subprocess.TimeoutExpired:
+            os.killpg(proc.pid, signal.SIGKILL)
+            pytest.fail("the pass was still in `status` after 30 s")
+        assert "status timed out after 2s" in scheduled.bodies(), scheduled.bodies()
+        assert not scheduled.lock.exists()
+
+    def test_step_exit_codes_pass_through_the_limit(self, scheduled: Pass) -> None:
+        fake_bin(scheduled, 'if [ "$1" = process ]; then echo boom; exit 3; fi\nexit 0\n')
+        scheduled.run()
+        assert "process exited 3: boom" in scheduled.bodies(), scheduled.bodies()
+
+    def test_malformed_limit_falls_back_to_the_default(self, scheduled: Pass) -> None:
+        scheduled.run({"STATUS_TIMEOUT": "abc"})
+        log = scheduled.run_log()
+        assert 'STATUS_TIMEOUT="abc" is not a whole number of seconds' in log
+        assert "status timed out" not in scheduled.bodies()

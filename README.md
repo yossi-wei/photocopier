@@ -108,7 +108,9 @@ scheduler needs it, and is configured only through environment variables (see it
   after a restart or a trip;
 - treats "NAS not mounted" as normal: ingest still runs and spools, delivery waits, and the
   summary says so (and says when the share landed at `/Volumes/media-1` instead);
-- puts a time limit on every step;
+- puts a time limit on every step and on the reporting `status` call (`STATUS_TIMEOUT`,
+  300 s). A step that runs out of time is stopped with everything it started, rclone
+  included, before the lock is released;
 - emails (through `NOTIFY_CMD`) at most one failure message per 24 hours for the same
   failure, plus one summary the first time it runs on each calendar day (local time), which
   flags failures, triaged files, undelivered files older than `BACKLOG_WARN_DAYS`, and each
