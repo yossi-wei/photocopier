@@ -14,7 +14,7 @@ import pytest
 
 from photocopier.errors import RcloneError
 from photocopier.flush import flush
-from photocopier.ingest import ingest, is_junk, select_within_budget
+from photocopier.ingest import ingest, is_junk, render, select_within_budget
 from photocopier.ledger import Ledger, State
 from photocopier.process import process
 from photocopier.rclone import Rclone, RemoteItem
@@ -690,3 +690,48 @@ class TestListingProblemsStayWithTheirSource:
         by_id = {s.source_id: s for s in result.sources}
         assert "timed out after 1s" in (by_id["phone-1"].listing_error or "")
         assert len(by_id["phone-2"].ingested) == 1
+
+
+class TestHashlessListing:
+    """A remote that reports no hash keys items by path alone (D15). Ingest says so."""
+
+    @pytest.fixture
+    def hashless_config(self, tmp_path: Path, spool_root: Path):
+        strip = (
+            f"{shlex.quote(sys.executable)} -c "
+            "\"import json,sys; e=json.load(sys.stdin); "
+            "[x.pop('Hashes', None) for x in e]; print(json.dumps(e))\""
+        )
+        wrapper = tmp_path / "rclone-hashless"
+        wrapper.write_text(
+            "#!/bin/sh\n"
+            f'if [ "$1" = lsjson ]; then {shlex.quote(sys.executable)} '
+            f'{shlex.quote(str(FAKE_RCLONE))} "$@" | {strip}; exit $?; fi\n'
+            f'exec {shlex.quote(sys.executable)} {shlex.quote(str(FAKE_RCLONE))} "$@"\n',
+            encoding="utf-8",
+        )
+        wrapper.chmod(0o755)
+        config = make_config(spool_root)
+        config = replace(config, rclone=replace(config.rclone, binary=str(wrapper)))
+        spool = Spool.from_config(config.spool)
+        spool.ensure()
+        return config, spool
+
+    def test_hashless_files_are_counted_and_named(
+        self, hashless_config, remote_root: Path
+    ) -> None:
+        config, spool = hashless_config
+        write_file(remote_root / CAMERA_ROLL / PHOTO, b"A" * 100)
+        write_file(remote_root / CAMERA_ROLL / ".DS_Store", b"x")
+        result = run_ingest(config, spool)
+        assert result.sources[0].hashless == 1, "junk is not counted"
+        assert (
+            "    WARNING: 1 file(s) listed with no hash, so a re-upload at the same path "
+            "would be missed (D15)" in render(result, spool)
+        )
+
+    def test_hashed_listing_has_no_warning(self, config, spool, remote_root: Path) -> None:
+        write_file(remote_root / CAMERA_ROLL / PHOTO, b"A" * 100)
+        result = run_ingest(config, spool)
+        assert result.sources[0].hashless == 0
+        assert "WARNING" not in render(result, spool)
