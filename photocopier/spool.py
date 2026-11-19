@@ -6,6 +6,7 @@ it never lives anywhere the OS considers disposable. See D7.
 
 from __future__ import annotations
 
+import hashlib
 import shutil
 from dataclasses import dataclass
 from pathlib import Path
@@ -40,6 +41,12 @@ class Spool:
 
     def source_incoming(self, source_id: str) -> Path:
         return self.incoming / source_id
+
+    def incoming_root_for(self, source_id: str, src_path: str, src_hash: str) -> Path:
+        plain = self.source_incoming(source_id)
+        if not (plain / src_path).exists():
+            return plain
+        return plain / hashlib.sha256(src_hash.encode()).hexdigest()[:16]
 
     def ensure(self) -> None:
         for path in (self.root, self.incoming, self.outbox, self.triage):

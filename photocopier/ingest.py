@@ -14,6 +14,7 @@ reverse ordering costs at most a re-download.
 
 from __future__ import annotations
 
+from collections import defaultdict
 from dataclasses import dataclass, field
 from datetime import date
 from pathlib import Path
@@ -165,7 +166,12 @@ def ingest_source(
         return result
 
     dest = spool.source_incoming(source.id)
-    rel_paths = [item.path for item in result.selected]
+    placed: list[tuple[RemoteItem, Path]] = []
+    batches: defaultdict[Path, list[str]] = defaultdict(list)
+    for item in result.selected:
+        root = spool.incoming_root_for(source.id, item.path, item.hash)
+        placed.append((item, root))
+        batches[root].append(item.path)
 
     # The source's incoming folder may still hold files from an earlier, unprocessed
     # ingest, so progress counts only what lands on top of them.
@@ -175,27 +181,26 @@ def ingest_source(
         files, nbytes = landed_so_far(dest)
         return files - before_files, nbytes - before_bytes
 
-    copy_error: str | None = None
-    try:
-        with progress.task(
-            f"ingest {source.id}",
-            items=len(result.selected),
-            total_bytes=result.selected_bytes,
-            poll=poll,
-        ):
-            rclone.copy_files(source.path, dest, rel_paths)
-    except Exception as exc:  # noqa: BLE001 - recorded per item below
-        # A partial transfer is normal here: whatever landed is still verified and
-        # recorded, and the rest is retried on the next run.
-        copy_error = str(exc)
+    copy_errors: dict[Path, str] = {}
+    with progress.task(
+        f"ingest {source.id}",
+        items=len(result.selected),
+        total_bytes=result.selected_bytes,
+        poll=poll,
+    ):
+        for root, rel_paths in batches.items():
+            try:
+                rclone.copy_files(source.path, root, rel_paths)
+            except Exception as exc:
+                copy_errors[root] = str(exc)
 
-    for item in result.selected:
-        landed = dest / item.path
+    for item, root in placed:
+        landed = root / item.path
         if landed.is_file() and landed.stat().st_size == item.size:
             ledger.record_ingested(source.id, item, landed)
             result.ingested.append(item)
         else:
-            reason = copy_error or "file missing or truncated after copy"
+            reason = copy_errors.get(root, "file missing or truncated after copy")
             ledger.record_failure(source.id, item, reason)
             result.failed.append((item, reason))
 
