@@ -48,8 +48,8 @@ from .resolve import pending, render_pending, resolve_discard, resolve_filed
 from .resolve import render as render_resolve
 from .spool import Spool
 from .triage import Triage
+from .validate import likely_roots, validate
 from .validate import render as render_validate
-from .validate import validate
 
 
 def _iso_date(value: str) -> date:
@@ -411,6 +411,15 @@ def cmd_validate(args: argparse.Namespace) -> int:
 
     result = validate(root, cfg.classify, limit=args.limit)
     print(render_validate(result, root))
+    if result.checked == 0:
+        # Zero files agree with nothing: an empty or wrong-level folder is not a pass.
+        hint = ", ".join(str(p) for p in likely_roots(root))
+        print(
+            f"error: no dated photos or videos under {root}; it needs YYYY folders directly "
+            f"inside it" + (f". Try {hint}" if hint else ""),
+            file=sys.stderr,
+        )
+        return 1
     return 1 if result.disagree else 0
 
 

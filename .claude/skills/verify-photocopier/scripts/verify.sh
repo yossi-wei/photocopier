@@ -43,6 +43,15 @@ tree_hash() {
                    git ls-files -o --exclude-standard photocopier; } | shasum | cut -c1-12)
 }
 
+# Fingerprint of the photocopier package installed in a sandbox venv, so doctor can tell
+# when something other than up replaced the build.
+installed_hash() {
+  local pkg
+  pkg="$(find "$1/venv/lib" -maxdepth 4 -type d -path '*/site-packages/photocopier' 2>/dev/null | head -1)"
+  [ -n "$pkg" ] || { echo none; return; }
+  (cd "$pkg" && find . -name '*.py' -type f | LC_ALL=C sort | xargs shasum | shasum | cut -c1-12)
+}
+
 # The sandbox paths must never resolve to the real installation.
 assert_sandboxed() {
   local sb="$1/sandbox" cfg="$1/sandbox/config.toml"
@@ -141,6 +150,7 @@ EOF
     printf 'REPO=%q\n' "$REPO"
     printf 'HEAD=%q\n' "$(git -C "$REPO" rev-parse --short HEAD 2>/dev/null || echo none)"
     printf 'TREE=%q\n' "$(tree_hash)"
+    printf 'BUILD=%q\n' "$(installed_hash "$sb")"
     printf 'CREATED=%q\n' "$(date -u +%FT%TZ)"
   } > "$sb/run.env"
   cp "$sb/run.env" "$ev/run.env"
@@ -164,6 +174,9 @@ cmd_doctor() {
   local head; head="$(git -C "$REPO" rev-parse --short HEAD 2>/dev/null || echo none)"
   if [ "$head" = "$HEAD" ] && [ "$now" = "$TREE" ]; then echo "[ok  ] build matches the checkout ($HEAD)"
   else echo "[FAIL] checkout changed since this sandbox was built: tear down and run up again"; bad=1; fi
+  if [ -z "${BUILD:-}" ]; then echo "[warn] run.env predates the installed-build check; run up again to get it"
+  elif [ "$(installed_hash "$sb")" = "$BUILD" ]; then echo "[ok  ] installed build is the one up installed"
+  else echo "[FAIL] installed build differs from the one up installed: something reinstalled the venv; tear down and run up again"; bad=1; fi
   echo "--- photocopier doctor (sandbox)"
   (cd "$sb" && pc_env "$run" "$sb/venv/bin/photocopier" -c "$sb/config.toml" doctor) || bad=1
   return $bad
