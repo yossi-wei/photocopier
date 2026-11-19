@@ -6,6 +6,9 @@ only the subcommands photocopier uses: version, listremotes, lsjson, copy.
 
 $FAKE_RCLONE_FAIL_ON, if set, makes `copy` fail after transferring files whose relative
 path sorts before it — used to test partial-transfer recovery.
+
+$FAKE_RCLONE_FAIL_LSJSON, if set to one or more comma-separated source paths, makes `lsjson`
+of each of them exit 1.
 """
 
 from __future__ import annotations
@@ -77,6 +80,10 @@ def cmd_lsjson(argv: list[str]) -> int:
         sys.stderr.write("lsjson: no remote:path given\n")
         return 2
     _, path = split_remote(targets[0])
+    failing = os.environ.get("FAKE_RCLONE_FAIL_LSJSON", "")
+    if failing and path in failing.split(","):
+        sys.stderr.write(f"2026/11/17 00:00:00 ERROR : {path}: simulated lsjson failure\n")
+        return 1
     base = root() / path
 
     entries = []
