@@ -22,8 +22,11 @@ from .ledger import Item, Ledger, Moves, file_identity
 NO_DATE = "no_date"
 UNKNOWN_TYPE = "unknown_type"
 DEST_CONFLICT = "dest_conflict"
+# A file in incoming/ the ledger never recorded, left by an ingest killed between the
+# copy and the ledger write. Its bytes are kept and shown to a human rather than guessed at.
+UNTRACKED = "untracked"
 
-REASONS = (NO_DATE, UNKNOWN_TYPE, DEST_CONFLICT)
+REASONS = (NO_DATE, UNKNOWN_TYPE, DEST_CONFLICT, UNTRACKED)
 
 MANIFEST_NAME = "manifest.jsonl"
 

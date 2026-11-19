@@ -10,18 +10,26 @@ turn this stage into a full byte copy of every photo.
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
-from datetime import date
+from datetime import UTC, date, datetime
 from pathlib import Path
 
 from .config import Config
 from .dates import resolve
 from .flush import destination_root
-from .layout import Destination, destination_for, same_content
+from .ingest import RCLONE_PARTIAL_SUFFIX
+from .layout import Destination, destination_for, file_digest, same_content
 from .ledger import Item, Ledger, Moves, State
 from .progress import QUIET, Progress
+from .rclone import RemoteItem
 from .spool import Spool
-from .triage import DEST_CONFLICT, NO_DATE, UNKNOWN_TYPE, Triage
+from .triage import DEST_CONFLICT, NO_DATE, UNKNOWN_TYPE, UNTRACKED, Triage
+
+# The folder ingest puts a later version under, see Spool.incoming_root_for.
+VERSION_DIR = re.compile(r"^[0-9a-f]{16}$")
+# Untracked files are keyed by their own bytes, which never collides with a remote hash.
+LOCAL_HASH_PREFIX = "local-sha256:"
 
 
 @dataclass
@@ -126,7 +134,7 @@ def process_item(
     _prune_empty(spool.incoming, source.parent)
 
 
-def _drop_moved_on_leftovers(
+def _settle_strays(
     config: Config,
     ledger: Ledger,
     spool: Spool,
@@ -134,29 +142,106 @@ def _drop_moved_on_leftovers(
     result: ProcessResult,
     *,
     dry_run: bool,
-) -> None:
+) -> list[Path]:
+    """Deal with files in incoming/ that no pending item points at.
+
+    A copy already held downstream is a leftover and is dropped. A copy of a version still
+    waiting is dropped too. A file the ledger never recorded is returned, to be triaged as
+    untracked. A file a failed copy left behind, and an rclone partial, stay where they are:
+    the retry fetches a fresh copy.
+    """
     waiting = {item.spool_path for item in pending}
     strays = [
         path
         for path in spool.incoming.rglob("*")
-        if path.is_file() and str(path) not in waiting
+        if path.is_file()
+        and str(path) not in waiting
+        and not path.name.endswith(RCLONE_PARTIAL_SUFFIX)
     ]
     if not strays:
-        return
+        return []
     moved_on: dict[str, list[Item]] = {}
     for state in (State.PROCESSED, State.DELIVERED):
         for item in ledger.items_in_state(state):
             if item.dest_path:
                 landed = spool.source_incoming(item.source_id) / item.src_path
                 moved_on.setdefault(str(landed), []).append(item)
+    versions: dict[tuple[str, str], list[Item]] = {}
+    for item in pending:
+        versions.setdefault((item.source_id, item.src_path), []).append(item)
+    failed = {(item.source_id, item.src_path) for item in ledger.items_in_state(State.FAILED)}
+
+    untracked: list[Path] = []
     for path in strays:
         held = _held_downstream(path, moved_on.get(str(path), []), config, spool)
-        if held is None:
+        if held is not None:
+            result.duplicates.append(held)
+            if not dry_run:
+                path.unlink()
+                _prune_empty(spool.incoming, path.parent)
             continue
-        result.duplicates.append(held)
-        if not dry_run:
-            path.unlink()
-            _prune_empty(spool.incoming, path.parent)
+        key = _stray_key(spool, path)
+        if key in failed:
+            continue
+        if any(
+            item.spool_path and same_content(path, Path(item.spool_path))
+            for item in versions.get(key, [])
+            if Path(item.spool_path or "").is_file()
+        ):
+            if not dry_run:
+                path.unlink()
+                _prune_empty(spool.incoming, path.parent)
+            continue
+        untracked.append(path)
+    return untracked
+
+
+def _stray_key(spool: Spool, path: Path) -> tuple[str, str]:
+    """(source id, source-relative path) of a file under incoming/, version folder dropped."""
+    source_id, *rest = path.relative_to(spool.incoming).parts
+    if len(rest) > 1 and VERSION_DIR.match(rest[0]):
+        rest = rest[1:]
+    return source_id, "/".join(rest)
+
+
+def _admit_untracked(
+    path: Path,
+    spool: Spool,
+    triage: Triage,
+    ledger: Ledger,
+    moves: Moves,
+    result: ProcessResult,
+    *,
+    dry_run: bool,
+) -> None:
+    """Record an untracked file in the ledger, then triage it, so its bytes are never lost.
+
+    A kill between the two leaves an ingested row pointing at the file, which the next pass
+    processes like any other: the file is tracked either way.
+    """
+    source_id, src_path = _stray_key(spool, path)
+    stat = path.stat()
+    remote = RemoteItem(
+        path=src_path,
+        name=path.name,
+        size=stat.st_size,
+        mod_time=datetime.fromtimestamp(stat.st_mtime, UTC).isoformat().replace("+00:00", "Z"),
+        hash=LOCAL_HASH_PREFIX + file_digest(path),
+    )
+    if dry_run:
+        stand_in = Item(
+            id=0, source_id=source_id, src_path=src_path, src_size=remote.size,
+            src_hash=remote.hash, state=State.INGESTED, spool_path=str(path),
+        )
+        result.triaged.append((stand_in, UNTRACKED))
+        return
+    ledger.record_ingested(source_id, remote, path)
+    item = next(
+        row for row in ledger.items_in_state(State.INGESTED, source_id)
+        if row.spool_path == str(path)
+    )
+    _triage(item, path, UNTRACKED, "in incoming/ with no ledger record (killed ingest)",
+            triage, moves, result, spool, dry_run=False)
 
 
 def _held_downstream(path: Path, items: list[Item], config: Config, spool: Spool) -> Item | None:
@@ -200,8 +285,10 @@ def process(
     triage.settle(ledger)
 
     pending = ledger.items_in_state(State.INGESTED)
-    _drop_moved_on_leftovers(config, ledger, spool, pending, result, dry_run=dry_run)
+    untracked = _settle_strays(config, ledger, spool, pending, result, dry_run=dry_run)
     with Moves(ledger) as moves, progress.task("process", items=len(pending)) as task:
+        for path in untracked:
+            _admit_untracked(path, spool, triage, ledger, moves, result, dry_run=dry_run)
         for item in pending:
             task.current(Path(item.src_path).name)
             process_item(item, config, spool, triage, ledger, moves, result, dry_run=dry_run)
