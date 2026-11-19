@@ -60,6 +60,21 @@ def _walk(root: Path):
                     yield entry, year, int(month_dir.name)
 
 
+def likely_roots(root: Path) -> list[Path]:
+    """Where a YYYY tree probably is, when `root` itself holds no YYYY folders.
+
+    Pointed one level too high (the share, with photos/ and video/ under it) the answer is a
+    child; pointed one level too low (a year folder) it is the parent.
+    """
+    def has_years(path: Path) -> bool:
+        return any(p.is_dir() and YEAR.match(p.name) for p in path.iterdir())
+
+    candidates = [p for p in sorted(root.iterdir()) if p.is_dir() and has_years(p)]
+    if not candidates and YEAR.match(root.name) and has_years(root.parent):
+        candidates.append(root.parent)
+    return candidates
+
+
 def validate(root: Path, classify: ClassifyConfig, *, limit: int = 0) -> ValidationResult:
     result = ValidationResult()
 

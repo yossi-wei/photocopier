@@ -69,9 +69,14 @@ Doctor is read-only. Run it first, and again whenever something looks off. It ch
 - every config path is inside the sandbox
 - the image is attached at `RUN/sandbox/nas`, and the marker is present
 - the installed build is present and still matches the checkout (HEAD plus a fingerprint of uncommitted changes to `photocopier/`, `scripts/`, `pyproject.toml`)
+- the package in the sandbox venv is still the one `up` installed (a fingerprint of its `.py` files), so a hand-run `uv pip install` into the venv is caught
 - `photocopier doctor` passes against the sandbox config
 
-If doctor says the checkout changed, the sandbox is testing old code. Run `down`, then `up` again.
+If doctor says the checkout changed or the installed build differs, the sandbox is testing other code. Run `down`, then `up` again. Never install into `RUN/sandbox/venv` by hand.
+
+To probe the installed code directly, run its Python from outside the checkout, `cd / && RUN/sandbox/venv/bin/python -I -c ...`. Run from the checkout, `import photocopier` finds the checkout's own `photocopier/` folder instead of the venv, and hides any difference.
+
+`photocopier validate PATH` needs `YYYY` folders directly inside PATH, so point it at `nas/photos` or `nas/video`, not the share. It exits 1, and names the right folder when it checks 0 files.
 
 ## Drive
 

@@ -432,6 +432,39 @@ class TestValidateCommand:
         assert main(["-c", str(config_file), "validate", str(tmp_path / "absent")]) == 1
         assert "not a directory" in capsys.readouterr().err
 
+    def share(self, tmp_path: Path) -> Path:
+        """A library as the NAS holds it: photos/YYYY/MM and video/YYYY under one share."""
+        root = tmp_path / "share"
+        photos = root / "photos" / "2026" / "10"
+        photos.mkdir(parents=True)
+        shutil.copy2(FIXTURES / "PXL_20261101_021009424.jpg", photos / "a.jpg")
+        (root / "video" / "2026").mkdir(parents=True)
+        return root
+
+    def test_share_root_checks_nothing_and_says_where_to_look(
+        self, config_file: Path, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """Pointed one level too high, validate used to report 0 files checked and exit 0."""
+        root = self.share(tmp_path)
+        assert main(["-c", str(config_file), "validate", str(root)]) == 1
+        err = capsys.readouterr().err
+        assert "no dated photos or videos" in err
+        assert f"Try {root / 'photos'}, {root / 'video'}" in err
+
+    def test_year_folder_points_one_level_up(
+        self, config_file: Path, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        root = self.share(tmp_path)
+        assert main(["-c", str(config_file), "validate", str(root / "photos" / "2026")]) == 1
+        assert f"Try {root / 'photos'}" in capsys.readouterr().err
+
+    def test_empty_folder_fails_without_a_hint(
+        self, config_file: Path, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        (tmp_path / "empty").mkdir()
+        assert main(["-c", str(config_file), "validate", str(tmp_path / "empty")]) == 1
+        assert "Try" not in capsys.readouterr().err
+
 
 class TestFlushCommand:
     def test_unmounted_share_fails_the_command_cleanly(
