@@ -261,6 +261,12 @@ such as `PXL_20260601_1127.jpg` or `PXL-20260601-112702768.jpg`, has no instant 
 convert, so it keeps the day as written. Every other filename pattern is still taken as
 written.
 
+**Addendum, 2026-11-18: ChatGPT export names.** `ChatGPT Image Mar 29, 2025, 09_50_28 PM.png`
+carries no EXIF and used to triage every time. Its spelled date is now a filename tier,
+below the numeric patterns and above epoch milliseconds, taken as written: the app names
+the file in the local time of the device that saved it. The month is read in English only;
+a name in another language still triages.
+
 Measured on the same 3720 EXIF-dated Pixel photos, from a read-only copy of the live
 ledger, with the machine in `America/New_York`:
 

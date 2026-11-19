@@ -52,6 +52,15 @@ FILENAME_PATTERNS: tuple[re.Pattern[str], ...] = (
     re.compile(r"[_-](?P<y>\d{4})-(?P<m>\d{2})-(?P<d>\d{2})[_-]"),
 )
 
+# ChatGPT Image Mar 29, 2025, 09_50_28 PM.png: the app's export name, spelled in English,
+# in the local time of the device that saved it. Taken as written.
+CHATGPT_PATTERN = re.compile(
+    r"^ChatGPT Image (?P<mon>[A-Z][a-z]{2}) (?P<d>\d{1,2}), (?P<y>\d{4}),"
+)
+MONTHS = {name: number for number, name in enumerate(
+    ("Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"), 1
+)}
+
 # 1776778281073.mp4, img_1_1749913720949.jpg: Unix epoch in milliseconds, as written by
 # some gallery and screen-capture apps. Thirteen digits starting with 1 covers 2001-2286.
 EPOCH_MS_PATTERN = re.compile(r"^(?:img_\d+_)?(?P<ms>1\d{12})(?:\.|$)", re.IGNORECASE)
@@ -100,6 +109,8 @@ def date_from_filename(filename: str) -> date | None:
         resolved = _build(int(match["y"]), int(match["m"]), int(match["d"]))
         if resolved:
             return resolved
+    if (match := CHATGPT_PATTERN.search(filename)) and (month := MONTHS.get(match["mon"])):
+        return _build(int(match["y"]), month, int(match["d"]))
     if match := EPOCH_MS_PATTERN.search(filename):
         try:
             instant = datetime.fromtimestamp(int(match["ms"]) / 1000, tz=UTC)

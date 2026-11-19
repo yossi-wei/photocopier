@@ -44,6 +44,9 @@ STRIPPED_JPEG = "1J1A3188.jpg"
         ("Screenshot_20250608-073110.png", date(2025, 6, 8)),
         ("1776778281073.mp4", date(2026, 4, 21)),
         ("img_6_1749913720949.jpg", date(2025, 6, 14)),
+        ("ChatGPT Image Mar 29, 2025, 09_50_28 PM.png", date(2025, 3, 29)),
+        ("ChatGPT Image Jun 5, 2025, 08_01_00 AM.png", date(2025, 6, 5)),
+        ("ChatGPT Image Dec 31, 2025, 11_59_59 PM (1).png", date(2025, 12, 31)),
     ],
 )
 @pytest.mark.usefixtures("eastern")
@@ -77,6 +80,10 @@ def test_home_zone_rule_files_a_video_shot_abroad_on_new_years_day_in_the_old_ye
         "0000000000000.mp4",        # zeroed epoch, not a plausible timestamp
         "9999999999999.mp4",        # 13 digits, but not starting with 1
         "img_6_12345.jpg",          # short number is a counter, not an epoch
+        "ChatGPT Image.png",        # no date at all
+        "ChatGPT Image Feb 30, 2025, 10_00_00 AM.png",  # no such day
+        "ChatGPT Image Foo 3, 2025, 10_00_00 AM.png",   # not a month
+        "ChatGPT Image Mar 3, 1969, 10_00_00 AM.png",   # below MIN_YEAR
         "",
     ],
 )
