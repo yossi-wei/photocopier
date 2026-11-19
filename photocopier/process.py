@@ -16,7 +16,7 @@ from datetime import UTC, date, datetime
 from pathlib import Path
 
 from .config import Config
-from .dates import resolve
+from .dates import coarse_date, resolve
 from .flush import destination_root
 from .ingest import RCLONE_PARTIAL_SUFFIX
 from .layout import Destination, destination_for, file_digest, same_content
@@ -24,7 +24,7 @@ from .ledger import Item, Ledger, Moves, State
 from .progress import QUIET, Progress
 from .rclone import RemoteItem
 from .spool import Spool
-from .triage import DEST_CONFLICT, NO_DATE, UNKNOWN_TYPE, UNTRACKED, Triage
+from .triage import BEFORE_CUTOFF, DEST_CONFLICT, NO_DATE, UNKNOWN_TYPE, UNTRACKED, Triage
 
 # The folder ingest puts a later version under, see Spool.incoming_root_for.
 VERSION_DIR = re.compile(r"^[0-9a-f]{16}$")
@@ -95,7 +95,18 @@ def process_item(
                 triage, moves, result, spool, dry_run=dry_run)
         return
 
-    suffix = config.source(item.source_id).suffix
+    source_config = config.source(item.source_id)
+    cutoff = source_config.cutoff
+    if cutoff and when < cutoff and coarse_date(item.src_path, filename)[0] is None:
+        # Ingest skips what its name or folder dates before the cutoff. This file carried no
+        # such date, so only EXIF shows it is older. A file whose name dates it before the
+        # cutoff came down on purpose, through an `ingest --since` window, and is filed.
+        _triage(item, source, BEFORE_CUTOFF,
+                f"{date_source} dates it {when}, before the {cutoff} cutoff",
+                triage, moves, result, spool, dry_run=dry_run)
+        return
+
+    suffix = source_config.suffix
     destination = destination_for(filename, kind, when, suffix)
     target = spool.outbox / destination.relative
 

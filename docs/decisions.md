@@ -338,7 +338,10 @@ outside it, the same rule as the cutoff (D1's objection to `--max-age`).
 
 **Consequence.** The config and the scheduled job are untouched. `process` and `flush`
 need no window: they act on whatever ingest put in the spool. A file whose EXIF date
-disagrees with its filename can still be filed outside the window's months.
+disagrees with its filename can still be filed outside the window's months. The converse
+also holds and is accepted (2026-11-18): a file whose name dates it outside the window but
+whose EXIF falls inside is skipped by that run and fetched by any later or wider one.
+Judging the window after download would mean fetching every file to check it.
 
 ---
 
@@ -370,4 +373,24 @@ failed scheduled steps in the last 30 days, and the launcher still emails each o
 **Consequence.** The streak is computed from the `runs` table, which starts empty, so the
 first two weeks are evidenced by the launcher logs rather than by `status`. Under this
 definition those logs show 16 consecutive days.
+
+---
+
+## D14 — A file the cutoff missed because its name carries no date goes to triage
+
+**Context.** Ingest applies each source's cutoff to the date in the file's name or folder,
+because that is all it has before download (D1). A file with neither, such as an edited
+`edited.jpg`, always comes down, and if its EXIF predates the cutoff it used to be filed
+into a month the cutoff was meant to exclude.
+
+**Options.** Keep filing it. Triage it as `before_cutoff`. Record it in a new ledger state
+and never file it.
+
+**Decision.** Triage, decided by the operator on 2026-11-18. It needs no new state, nothing
+is dropped silently, and `resolve --discard` or `--filed-at` closes each one out (D11).
+
+**Scope.** Only a file whose name and folder carry no date. A file whose name dates it
+before the cutoff came down on purpose, through an `ingest --since` window (D12), and is
+filed as before. A file whose name dates it on or after the cutoff but whose EXIF is
+earlier is filed by EXIF, the disagreement D12 already accepts.
 

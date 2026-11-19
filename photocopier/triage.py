@@ -22,11 +22,14 @@ from .ledger import Item, Ledger, Moves, file_identity
 NO_DATE = "no_date"
 UNKNOWN_TYPE = "unknown_type"
 DEST_CONFLICT = "dest_conflict"
+# Dated by EXIF to before its source's cutoff, with no date in its name or folder, so ingest
+# could not skip it. A human decides; see D14.
+BEFORE_CUTOFF = "before_cutoff"
 # A file in incoming/ the ledger never recorded, left by an ingest killed between the
 # copy and the ledger write. Its bytes are kept and shown to a human rather than guessed at.
 UNTRACKED = "untracked"
 
-REASONS = (NO_DATE, UNKNOWN_TYPE, DEST_CONFLICT, UNTRACKED)
+REASONS = (NO_DATE, UNKNOWN_TYPE, DEST_CONFLICT, UNTRACKED, BEFORE_CUTOFF)
 
 MANIFEST_NAME = "manifest.jsonl"
 
