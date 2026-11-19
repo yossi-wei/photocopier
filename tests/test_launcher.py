@@ -15,6 +15,8 @@ import shlex
 import sqlite3
 import subprocess
 import sys
+import time
+from collections.abc import Iterator
 from contextlib import closing
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
@@ -346,3 +348,115 @@ class TestLauncherSilentSource:
         subprocess.run(["bash", str(LAUNCHER)], env=env, capture_output=True, timeout=300)
         email = scheduled.bodies()[mark:]
         assert_once_above_status(email, "WARNING: phone-2 has sent nothing for 16 days.")
+
+
+def hold_lock(p: Pass, holder: subprocess.Popen, *, job: str, started: str | None,
+              hours_old: float = 0) -> None:
+    """Leave the shared NAS lock as a job, or a crashed pass, would have left it."""
+    p.lock.mkdir(parents=True)
+    (p.lock / "pid").write_text(f"{holder.pid}\n", encoding="utf-8")
+    (p.lock / "job").write_text(f"{job}\n", encoding="utf-8")
+    if started is not None:
+        (p.lock / "started").write_text(f"{started}\n", encoding="utf-8")
+    when = time.time() - hours_old * 3600
+    for path in [*p.lock.iterdir(), p.lock]:
+        os.utime(path, (when, when))
+
+
+def start_time(pid: int) -> str:
+    out = subprocess.run(["ps", "-o", "lstart=", "-p", str(pid)], capture_output=True,
+                         text=True, env={**os.environ, "LC_ALL": "C"}, check=True).stdout
+    return " ".join(out.split())
+
+
+@pytest.fixture
+def stranger() -> Iterator[subprocess.Popen]:
+    """An unrelated live process, standing in for whatever took a crashed pass's pid."""
+    proc = subprocess.Popen(["sleep", "120"])
+    yield proc
+    proc.kill()
+    proc.wait()
+
+
+@pytest.fixture
+def live_pass(tmp_path: Path) -> Iterator[subprocess.Popen]:
+    """A process whose command line looks like a running launcher pass."""
+    script = tmp_path / "photocopier-run"
+    script.write_text("sleep 120\n", encoding="utf-8")
+    proc = subprocess.Popen(["bash", str(script)])
+    time.sleep(0.2)
+    yield proc
+    proc.kill()
+    proc.wait()
+
+
+class TestLauncherStaleLock:
+    def test_lock_held_by_an_unrelated_live_process_does_not_block_every_pass(
+        self, scheduled: Pass, stranger: subprocess.Popen
+    ) -> None:
+        """A lock left by a crashed pass, from a launcher too old to record a start time,
+        names a pid that macOS later gave to some other process. kill -0 succeeds, so on
+        trunk every pass is skipped until someone removes the lock."""
+        hold_lock(scheduled, stranger, job="photocopier", started=None, hours_old=48)
+        scheduled.run()
+        log = scheduled.run_log()
+        assert "== ingest" in log, f"the pass was skipped behind a stranger's pid:\n{log}"
+        assert f"took over a stale lock (pid {stranger.pid}" in log
+
+    def test_reused_pid_is_found_by_its_start_time(
+        self, scheduled: Pass, stranger: subprocess.Popen
+    ) -> None:
+        hold_lock(scheduled, stranger, job="photocopier", started="Thu Jan  1 00:00:00 2026")
+        scheduled.run()
+        assert "== ingest" in scheduled.run_log()
+
+    def test_lock_of_a_running_pass_is_honored(
+        self, scheduled: Pass, live_pass: subprocess.Popen
+    ) -> None:
+        hold_lock(scheduled, live_pass, job="photocopier", started=start_time(live_pass.pid))
+        scheduled.run()
+        log = scheduled.run_log()
+        assert "skipped: another NAS job (photocopier" in log, log
+        assert "== ingest" not in log
+        assert (scheduled.lock / "pid").read_text().strip() == str(live_pass.pid)
+
+    def test_pass_writes_its_start_time_into_the_lock(self, scheduled: Pass) -> None:
+        fake = scheduled.bin.read_text(encoding="utf-8")
+        copy = scheduled.root / "lock-copy"
+        scheduled.bin.write_text(
+            fake.replace("exec ", f'cp -R {shlex.quote(str(scheduled.lock))} '
+                         f'{shlex.quote(str(copy))} 2>/dev/null; exec ', 1),
+            encoding="utf-8",
+        )
+        scheduled.run()
+        assert (copy / "started").read_text().strip(), "the lock has no start time"
+        assert not scheduled.lock.exists(), "the lock outlived the pass"
+
+    def test_another_jobs_young_lock_is_honored_quietly(
+        self, scheduled: Pass, stranger: subprocess.Popen
+    ) -> None:
+        hold_lock(scheduled, stranger, job="nas-backup", started=None, hours_old=2)
+        scheduled.run()
+        assert "skipped: another NAS job (nas-backup" in scheduled.run_log()
+        assert scheduled.subjects() == []
+
+    def test_lock_held_for_more_than_a_day_is_emailed_once_a_day(
+        self, scheduled: Pass, stranger: subprocess.Popen
+    ) -> None:
+        hold_lock(scheduled, stranger, job="nas-backup", started=None, hours_old=30)
+        for _ in range(3):
+            scheduled.run()
+        blocked = [s for s in scheduled.subjects() if s.startswith("photocopier blocked")]
+        assert len(blocked) == 1, scheduled.bodies()
+        body = scheduled.bodies()
+        assert f"held by nas-backup (pid {stranger.pid})" in body
+        assert "last 30 hours" in body
+        assert "== ingest" not in scheduled.run_log()
+
+    def test_blocked_email_is_not_sent_on_a_dry_run(
+        self, scheduled: Pass, stranger: subprocess.Popen
+    ) -> None:
+        hold_lock(scheduled, stranger, job="nas-backup", started=None, hours_old=30)
+        scheduled.run({"PHOTOCOPIER_DRY_RUN": "1"})
+        assert scheduled.subjects() == []
+        assert not (scheduled.state / "blocked-date").exists()

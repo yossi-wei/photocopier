@@ -18,6 +18,7 @@
 #   NOTIFY_CMD          run as: $NOTIFY_CMD "<subject>" "<message>"; empty disables email ()
 #   BACKLOG_WARN_DAYS   warn in the summary when undelivered files are older than this (3)
 #   SOURCE_SILENT_DAYS  warn in the summary when a source has sent nothing for more days (7)
+#   LOCK_ALERT_HOURS    email once a day when another job has held the lock this long (24)
 #   PHOTOCOPIER_DRY_RUN set to 1 to pass --dry-run to every step and send no email ()
 #
 # Always exits 0 unless it cannot start; problems are reported by email and in the log.
@@ -33,6 +34,8 @@ NOTIFY_CMD="${NOTIFY_CMD:-}"
 BACKLOG_WARN_DAYS="${BACKLOG_WARN_DAYS:-3}"
 SOURCE_SILENT_DAYS="${SOURCE_SILENT_DAYS:-}"
 NAS_MOUNT_TRIES="${NAS_MOUNT_TRIES:-3}"
+LOCK_ALERT_HOURS="${LOCK_ALERT_HOURS:-24}"
+[[ "$LOCK_ALERT_HOURS" =~ ^[0-9]+$ ]] || LOCK_ALERT_HOURS=24
 NAS_MOUNT_WAIT="${NAS_MOUNT_WAIT:-15}"
 DRY="${PHOTOCOPIER_DRY_RUN:-}"
 dry=(); [ "$DRY" = 1 ] && dry=(--dry-run)
@@ -62,18 +65,49 @@ notify() {
 }
 
 # -- lock shared with the other NAS jobs. Skip this pass if another job holds it. --------
+# A pass killed without running its EXIT trap (a crash, a power cut) leaves the lock behind,
+# and after a restart its pid often belongs to some other process. So a photocopier lock
+# records its process's start time too, and counts as held only while that same process
+# runs. Another job's lock is always honored, but a lock held for more than a day is
+# emailed about, once a day, so a stuck job never silently stops every pass.
 have_lock=""
 release_lock() { [ -n "$have_lock" ] && rm -rf "$LOCK"; }
 trap release_lock EXIT
+started_of() { LC_ALL=C ps -o lstart= -p "$1" 2>/dev/null | tr -s ' ' | sed 's/^ //; s/ $//'; }
+# The holder is a past photocopier pass whose pid now names an unrelated process.
+reused_pid() {
+  local pid="$1" recorded
+  [ "$(cat "$LOCK/job" 2>/dev/null)" = photocopier ] || return 1
+  recorded="$(cat "$LOCK/started" 2>/dev/null || true)"
+  if [ -n "$recorded" ]; then [ "$(started_of "$pid")" != "$recorded" ]; return; fi
+  # A lock from a launcher that predates the start-time record: check the command instead.
+  case "$(ps -o command= -p "$pid" 2>/dev/null)" in *photocopier-run*) return 1 ;; esac
+}
+report_blocked() {
+  local pid="$1" job="$2" age_h today
+  age_h=$(( $(perl -e 'print int(time - (stat shift)[9])' "$LOCK" 2>/dev/null || echo 0) / 3600 ))
+  today="$(date +%F)"
+  [ "$age_h" -ge "$LOCK_ALERT_HOURS" ] || return 0
+  [ "$(cat "$STATE_DIR/blocked-date" 2>/dev/null || true)" != "$today" ] || return 0
+  notify "photocopier blocked on $(hostname -s)" \
+    "Every photocopier pass for the last $age_h hours has been skipped, because the NAS lock at $LOCK is held by $job (pid $pid). Nothing is lost: OneDrive still holds every photo. If $job is not running, remove $LOCK." \
+    && echo "$today" > "$STATE_DIR/blocked-date"
+}
 if ! mkdir "$LOCK" 2>/dev/null; then
   holder="$(cat "$LOCK/pid" 2>/dev/null || true)"
   if [ -n "$holder" ] && kill -0 "$holder" 2>/dev/null; then
-    log "skipped: another NAS job ($(cat "$LOCK/job" 2>/dev/null || echo '?'), pid $holder) holds the lock"
-    exit 0
+    if reused_pid "$holder"; then
+      log "took over a stale lock (pid $holder, started $(cat "$LOCK/started" 2>/dev/null || echo 'unrecorded')): that pid is now another process"
+    else
+      job="$(cat "$LOCK/job" 2>/dev/null || echo '?')"
+      log "skipped: another NAS job ($job, pid $holder) holds the lock"
+      report_blocked "$holder" "$job"
+      exit 0
+    fi
   fi
   rm -rf "$LOCK"; mkdir "$LOCK" || { log "could not take the lock"; exit 0; }
 fi
-have_lock=1; echo $$ > "$LOCK/pid"; echo photocopier > "$LOCK/job"
+have_lock=1; echo $$ > "$LOCK/pid"; echo photocopier > "$LOCK/job"; started_of $$ > "$LOCK/started"
 
 # -- NAS availability ----------------------------------------------------------------
 # After a restart or a trip, a bare host name like `freenas` often has no cached address,
