@@ -45,7 +45,13 @@ log() { printf '%s %s\n' "$(date '+%H:%M:%S')" "$*" | tee -a "$run_log"; }
 [ -x "$BIN" ] || { echo "photocopier not found at $BIN" >&2; exit 127; }
 
 with_timeout() { local secs="$1"; shift; perl -e 'alarm shift; exec @ARGV' "$secs" "$@"; }
-notify() { [ -n "$NOTIFY_CMD" ] && [ "$DRY" != 1 ] && { $NOTIFY_CMD "$1" "$2" || true; }; }
+notify() {
+  [ -n "$NOTIFY_CMD" ] && [ "$DRY" != 1 ] || return 1
+  local rc=0
+  $NOTIFY_CMD "$1" "$2" || rc=$?
+  [ "$rc" -eq 0 ] || log "could not send the email \"$1\", NOTIFY_CMD failed with exit $rc"
+  return "$rc"
+}
 
 # -- lock shared with the other NAS jobs. Skip this pass if another job holds it. --------
 have_lock=""
@@ -169,9 +175,7 @@ compose() {
 if [ -n "$summary_due" ]; then
   verdict="OK"; [ -n "$problem" ] && verdict="needs attention"
   subj="photocopier daily summary on $(hostname -s): $verdict"
-  if [ "$DRY" != 1 ] && [ -n "$NOTIFY_CMD" ]; then
-    $NOTIFY_CMD "$subj" "$(compose)" && echo "$today" > "$STATE_DIR/summary-date"
-  fi
+  notify "$subj" "$(compose)" && echo "$today" > "$STATE_DIR/summary-date"
 elif [ ${#failures[@]} -gt 0 ]; then
   # Same failure at most once per 24 h, so a six-hourly job cannot flood the inbox.
   key="$(printf '%s' "${failures[*]}" | shasum | cut -c1-16)"
