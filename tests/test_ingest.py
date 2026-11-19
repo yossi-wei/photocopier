@@ -2,7 +2,11 @@
 
 from __future__ import annotations
 
+import shlex
 import shutil
+import sys
+import time
+from dataclasses import replace
 from datetime import date
 from pathlib import Path
 
@@ -16,7 +20,7 @@ from photocopier.process import process
 from photocopier.rclone import Rclone, RemoteItem
 from photocopier.spool import Spool
 
-from .conftest import make_config, populate, write_file
+from .conftest import FAKE_RCLONE, make_config, populate, write_file
 
 CAMERA_ROLL = "Camera Roll"
 PHOTO = "2026/06/PXL_20260615_101500.jpg"
@@ -612,3 +616,77 @@ class TestKillBetweenCopyAndRecord:
 
         assert {v1, v2} <= in_library_or_triage(spool, nas), where(spool, nas)
 
+
+def listing_wrapper(tmp_path: Path, source_path: str, action: str) -> Path:
+    """An rclone that runs `action` for an lsjson of `source_path` and is the fake otherwise."""
+    script = tmp_path / "rclone-wrapper"
+    script.write_text(
+        "#!/bin/sh\n"
+        f'case "$*" in *lsjson*":{source_path}") {action};; esac\n'
+        f'exec {shlex.quote(sys.executable)} {shlex.quote(str(FAKE_RCLONE))} "$@"\n',
+        encoding="utf-8",
+    )
+    script.chmod(0o755)
+    return script
+
+
+class TestListingProblemsStayWithTheirSource:
+    @pytest.fixture
+    def two_phones(self, spool_root: Path, remote_root: Path):
+        def build(binary: Path, list_timeout_s: int = 900):
+            config = make_config(
+                spool_root,
+                sources=[
+                    {"id": "phone-1", "path": CAMERA_ROLL, "suffix": "phone-1"},
+                    {"id": "phone-2", "path": PHONE_2, "suffix": "phone-2"},
+                ],
+            )
+            rclone = replace(config.rclone, binary=str(binary), list_timeout_s=list_timeout_s)
+            config = replace(config, rclone=rclone)
+            write_file(remote_root / CAMERA_ROLL / PHOTO, b"1" * 100)
+            write_file(remote_root / PHONE_2 / PHOTO, b"2" * 100)
+            spool = Spool.from_config(config.spool)
+            spool.ensure()
+            return config, spool
+
+        return build
+
+    @pytest.mark.parametrize(
+        "listing",
+        [
+            '[{"Name": "x.jpg", "Size": 1, "IsDir": false}]',
+            '[{"Path": "x.jpg", "Size": "big"}]',
+            '["x.jpg"]',
+            '{"Path": "x.jpg"}',
+        ],
+        ids=["no-path", "bad-size", "not-an-object", "not-a-list"],
+    )
+    def test_malformed_listing_fails_only_its_own_phone(
+        self, two_phones, tmp_path: Path, listing: str
+    ) -> None:
+        """A malformed entry raised KeyError or ValueError, which aborted the run before the
+        other phones were listed."""
+        config, spool = two_phones(
+            listing_wrapper(tmp_path, CAMERA_ROLL, f"echo {shlex.quote(listing)}; exit 0")
+        )
+        with Ledger(spool.ledger_path) as ledger:
+            result = ingest(config, Rclone(config.rclone), ledger, spool)
+        by_id = {s.source_id: s for s in result.sources}
+        assert len(by_id["phone-2"].ingested) == 1
+        assert "rclone lsjson" in (by_id["phone-1"].listing_error or "")
+
+    def test_hung_listing_times_out_and_the_other_phone_still_ingests(
+        self, two_phones, tmp_path: Path
+    ) -> None:
+        """lsjson ran with no time limit, so a hung OneDrive listing held the run, and the NAS
+        lock, until the launcher's six-hour ingest alarm."""
+        config, spool = two_phones(
+            listing_wrapper(tmp_path, CAMERA_ROLL, "exec sleep 60"), list_timeout_s=1
+        )
+        start = time.monotonic()
+        with Ledger(spool.ledger_path) as ledger:
+            result = ingest(config, Rclone(config.rclone), ledger, spool)
+        assert time.monotonic() - start < 20
+        by_id = {s.source_id: s for s in result.sources}
+        assert "timed out after 1s" in (by_id["phone-1"].listing_error or "")
+        assert len(by_id["phone-2"].ingested) == 1

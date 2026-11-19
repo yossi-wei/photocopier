@@ -554,6 +554,37 @@ suffix = "phone-1"
         assert lines[-1] == "error: listing failed for phone-1, phone-2", f"got: {lines!r}"
 
 
+class TestMalformedListing:
+    def test_cli_names_the_phone_and_keeps_going(
+        self,
+        spool_root: Path,
+        remote_root: Path,
+        tmp_path: Path,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        """A malformed listing used to escape as a traceback with nothing ingested."""
+        wrapper = tmp_path / "rclone-malformed"
+        wrapper.write_text(
+            "#!/bin/sh\n"
+            f'case "$*" in *lsjson*":{CAMERA_ROLL}") '
+            """echo '[{"Path": "x.jpg", "Size": "big"}]'; exit 0;; esac\n"""
+            f'exec {shlex.quote(str(FAKE_RCLONE))} "$@"\n',
+            encoding="utf-8",
+        )
+        wrapper.chmod(0o755)
+        config_file = write_ingest_config(
+            tmp_path, spool_root, [("phone-1", CAMERA_ROLL), ("phone-2", PHONE_2)],
+            binary=wrapper,
+        )
+        populate(remote_root / PHONE_2, {"PXL_20261101_021009424.jpg": 100})
+
+        assert main(["-c", str(config_file), "ingest", "--no-progress"]) == 1
+        captured = capsys.readouterr()
+        assert "phone-2: ingested 1 file(s)" in captured.out, captured.out
+        assert "unexpected rclone lsjson entry" in captured.err, captured.err
+        assert captured.err.splitlines()[-1] == "error: listing failed for phone-1"
+
+
 class LauncherSandbox:
     def __init__(self, tmp_path: Path, remote_root: Path, spool_root: Path) -> None:
         self.root = tmp_path

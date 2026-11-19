@@ -29,6 +29,7 @@ mount_marker = ".photocopier-marker"
 remote    = "onedrive"
 transfers = 4
 bwlimit   = ""          # e.g. "2M" to be polite on hotel wifi
+list_timeout_s = 900     # give up on one phone's listing after this many seconds
 
 # One block per phone. Adding a phone is a config change, not a code change.
 [[source]]

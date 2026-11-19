@@ -64,6 +64,9 @@ class RcloneConfig:
     binary: str = "rclone"
     transfers: int = 4
     bwlimit: str = ""
+    # A hung OneDrive listing otherwise holds the run, and the NAS lock, until the
+    # launcher's six-hour ingest limit.
+    list_timeout_s: int = 900
 
 
 @dataclass(frozen=True)
@@ -173,11 +176,18 @@ def _rclone(raw: dict[str, Any]) -> RcloneConfig:
     transfers = raw.get("transfers", 4)
     if not isinstance(transfers, int) or transfers <= 0:
         raise ConfigError(f"[rclone].transfers must be a positive integer, got {transfers!r}")
+    list_timeout = raw.get("list_timeout_s", 900)
+    if not isinstance(list_timeout, int) or isinstance(list_timeout, bool) or list_timeout <= 0:
+        raise ConfigError(
+            f"[rclone].list_timeout_s must be a positive whole number of seconds, "
+            f"got {list_timeout!r}"
+        )
     return RcloneConfig(
         remote=str(remote),
         binary=raw.get("binary", "rclone"),
         transfers=transfers,
         bwlimit=str(raw.get("bwlimit", "")),
+        list_timeout_s=list_timeout,
     )
 
 
