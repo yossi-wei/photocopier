@@ -54,6 +54,7 @@ class Resolution:
 
 
 def pending(ledger: Ledger, triage: Triage) -> list[Pending]:
+    triage.settle(ledger)
     entries = triage.lookup()
     out: list[Pending] = []
     for item in ledger.items_in_state(State.TRIAGED):

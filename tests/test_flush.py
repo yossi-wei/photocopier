@@ -18,7 +18,7 @@ from photocopier.ingest import ingest
 from photocopier.ledger import Ledger, State
 from photocopier.process import process
 from photocopier.rclone import Rclone
-from photocopier.resolve import pending, resolve_filed
+from photocopier.resolve import pending, render_pending, resolve_filed
 from photocopier.spool import Spool
 from photocopier.triage import DEST_CONFLICT, Triage
 
@@ -433,6 +433,87 @@ class TestKilledFlush:
         assert ledger_states(spool) == [State.DELIVERED]
         assert outbox_files(spool) == set()
 
+    def test_kill_while_triaging_a_conflict_still_lists_it(self, wired, monkeypatch) -> None:
+        config, spool, nas, remote = wired
+        populate(remote / CAMERA_ROLL, {PHOTO: 4096})
+        original = (remote / CAMERA_ROLL / PHOTO).read_bytes()
+        pump(config, spool)
+        write_file(nas / STAGED, b"a different photo already filed by hand")
+
+        kill_on_call(monkeypatch, Ledger, "mark_triaged")
+        with pytest.raises(SimulatedSigkill):
+            run_flush(config, spool)
+        flushes = [scheduled_pass(config, spool) for _ in range(2)]
+
+        assert [len(f.missing) for f in flushes] == [0, 0]
+        assert (nas / STAGED).read_bytes() == b"a different photo already filed by hand"
+        with Ledger(spool.ledger_path) as ledger:
+            listed = [p for p in pending(ledger, Triage(spool.triage)) if p.present]
+        assert [p.item.src_path for p in listed] == [PHOTO]
+        assert listed[0].path.read_bytes() == original
+        assert "different content already at" in render_pending(listed, spool.triage)
+
+
+class TestKilledWhileTriagingAConflict:
+    OWN = b"A" * 4096
+    LATER = "2026/06/b/PXL_20260615_101500.jpg"
+
+    def kill_while_triaging(self, wired, monkeypatch, *, on_the_nas: bytes) -> None:
+        config, spool, nas, remote = wired
+        write_file(remote / CAMERA_ROLL / PHOTO, self.OWN)
+        pump(config, spool)
+        write_file(nas / STAGED, on_the_nas)
+        original = Ledger.mark_triaged
+        kill_on_call(monkeypatch, Ledger, "mark_triaged")
+        with pytest.raises(SimulatedSigkill):
+            run_flush(config, spool)
+        monkeypatch.setattr(Ledger, "mark_triaged", original)
+
+    def listed(self, spool: Spool) -> dict[str, bytes]:
+        with Ledger(spool.ledger_path) as ledger:
+            return {
+                p.item.src_path: p.path.read_bytes()
+                for p in pending(ledger, Triage(spool.triage))
+                if p.present
+            }
+
+    def states(self, spool: Spool) -> dict[str, str]:
+        with Ledger(spool.ledger_path) as ledger:
+            rows = ledger.conn.execute("SELECT src_path, state FROM items")
+            return {row["src_path"]: row["state"] for row in rows}
+
+    def test_the_row_is_listed_without_another_pass(self, wired, monkeypatch) -> None:
+        _config, spool, _nas, _remote = wired
+        self.kill_while_triaging(wired, monkeypatch, on_the_nas=b"Y" * 4096)
+
+        assert self.listed(spool) == {PHOTO: self.OWN}
+
+    def test_a_later_photo_for_the_same_destination_keeps_the_row_on_its_own_bytes(
+        self, wired, monkeypatch
+    ) -> None:
+        config, spool, nas, remote = wired
+        self.kill_while_triaging(wired, monkeypatch, on_the_nas=b"Y" * 4096)
+        write_file(remote / CAMERA_ROLL / self.LATER, b"Z" * 4096)
+        pump(config, spool)
+        run_flush(config, spool)
+
+        assert self.listed(spool) == {PHOTO: self.OWN, self.LATER: b"Z" * 4096}
+        assert (nas / STAGED).read_bytes() == b"Y" * 4096
+
+    def test_a_later_copy_of_the_nas_file_is_not_delivered_in_its_place(
+        self, wired, monkeypatch
+    ) -> None:
+        config, spool, nas, remote = wired
+        self.kill_while_triaging(wired, monkeypatch, on_the_nas=b"Z" * 4096)
+        write_file(remote / CAMERA_ROLL / self.LATER, b"Z" * 4096)
+        pump(config, spool)
+        run_flush(config, spool)
+        run_flush(config, spool)
+
+        assert self.states(spool) == {PHOTO: State.TRIAGED, self.LATER: State.DELIVERED}
+        assert self.listed(spool) == {PHOTO: self.OWN}
+        assert (nas / STAGED).read_bytes() == b"Z" * 4096
+
 
 class TestIdenticalCopies:
     A = "2026/06/a/PXL_20260615_101500.jpg"
@@ -466,6 +547,24 @@ class TestIdenticalCopies:
         assert ledger_states(spool) == [State.DELIVERED] * 2
         assert not last.missing
         assert outbox_files(spool) == set()
+
+    def test_kill_between_the_two_triage_writes_lists_both(self, wired, monkeypatch) -> None:
+        config, spool, nas, remote = wired
+        self.upload_twice(remote, b"C" * 2500)
+        pump(config, spool)
+        write_file(nas / STAGED, b"a different photo filed by hand")
+
+        kill_on_call(monkeypatch, Ledger, "mark_triaged", nth=2)
+        with pytest.raises(SimulatedSigkill):
+            run_flush(config, spool)
+        last = scheduled_pass(config, spool)
+
+        assert not last.missing
+        assert ledger_states(spool) == [State.TRIAGED] * 2
+        with Ledger(spool.ledger_path) as ledger:
+            listed = pending(ledger, Triage(spool.triage))
+        assert sorted(p.item.src_path for p in listed) == [self.A, self.B]
+        assert all(p.present and p.path.read_bytes() == b"C" * 2500 for p in listed)
 
     def test_both_go_to_triage_on_a_destination_conflict(self, wired) -> None:
         config, spool, nas, remote = wired

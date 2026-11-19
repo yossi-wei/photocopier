@@ -9,11 +9,12 @@ that is its whole reason for existing. See D1.
 from __future__ import annotations
 
 import sqlite3
-from collections.abc import Iterable, Iterator
+from collections.abc import Callable, Iterable, Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from enum import StrEnum
+from functools import partial
 from pathlib import Path
 
 from .errors import LedgerError
@@ -52,6 +53,8 @@ CREATE TABLE IF NOT EXISTS items (
   delivered_at  TEXT,
   attempts      INTEGER NOT NULL DEFAULT 0,
   last_error    TEXT,
+  target_path   TEXT,
+  target_identity TEXT,
   UNIQUE (source_id, src_path, src_hash)
 );
 
@@ -90,6 +93,8 @@ class Item:
     spool_path: str | None
     dest_path: str | None = None
     triage_reason: str | None = None
+    target_path: str | None = None
+    target_identity: str | None = None
 
 
 @dataclass(frozen=True)
@@ -142,6 +147,7 @@ class Ledger:
     def __init__(self, path: Path):
         self.path = path
         self._conn: sqlite3.Connection | None = None
+        self._in_transaction = False
 
     # -- lifecycle -------------------------------------------------------
 
@@ -155,9 +161,11 @@ class Ledger:
         self._conn.execute("PRAGMA journal_mode=WAL")
         self._conn.execute("PRAGMA foreign_keys=ON")
         self._conn.executescript(SCHEMA)
+        columns = {row["name"] for row in self._conn.execute("PRAGMA table_info(items)")}
+        for column in ("target_path", "target_identity"):
+            if column not in columns:
+                self._conn.execute(f"ALTER TABLE items ADD COLUMN {column} TEXT")
         self._conn.execute(
-            # Every schema change so far only adds tables, which the CREATE IF NOT
-            # EXISTS above has already done for an older ledger; record that it has.
             "INSERT INTO meta (key, value) VALUES ('schema_version', ?) "
             "ON CONFLICT(key) DO UPDATE SET value = excluded.value "
             "WHERE CAST(value AS INTEGER) < CAST(excluded.value AS INTEGER)",
@@ -185,6 +193,10 @@ class Ledger:
 
     @contextmanager
     def transaction(self) -> Iterator[sqlite3.Connection]:
+        if self._in_transaction:
+            yield self.conn
+            return
+        self._in_transaction = True
         try:
             yield self.conn
         except Exception:
@@ -192,6 +204,8 @@ class Ledger:
             raise
         else:
             self.conn.commit()
+        finally:
+            self._in_transaction = False
 
     # -- queries ---------------------------------------------------------
 
@@ -239,6 +253,13 @@ class Ledger:
             params.append(source_id)
         sql += " ORDER BY src_path"
         return [_row_to_item(row) for row in self.conn.execute(sql, params)]
+
+    def items_moving(self) -> list[Item]:
+        rows = self.conn.execute(
+            "SELECT * FROM items WHERE state IN (?, ?) AND target_identity IS NOT NULL",
+            (State.INGESTED.value, State.PROCESSED.value),
+        )
+        return [_row_to_item(row) for row in rows]
 
     def total_bytes_in_state(self, state: State) -> int:
         row = self.conn.execute(
@@ -367,6 +388,21 @@ class Ledger:
                 ),
             )
 
+    def record_target(self, item_id: int, target: Path, identity: str | None) -> None:
+        with self.transaction() as conn:
+            conn.execute(
+                "UPDATE items SET target_path = ?, target_identity = ? WHERE id = ?",
+                (str(target), identity, item_id),
+            )
+
+    def moved(self, item_id: int, spool_path: Path) -> None:
+        with self.transaction() as conn:
+            conn.execute(
+                "UPDATE items SET spool_path = ?, target_path = NULL, target_identity = NULL "
+                "WHERE id = ?",
+                (str(spool_path), item_id),
+            )
+
     def mark_processed(
         self,
         item_id: int,
@@ -376,16 +412,12 @@ class Ledger:
         resolved_date: str,
         date_source: str,
     ) -> None:
-        """Record a file that is confirmed present at its outbox location.
-
-        Called after the rename, never before — same ordering rule as ingest. If this
-        write is lost, the file is simply reprocessed, which is idempotent.
-        """
         with self.transaction() as conn:
             conn.execute(
                 """
                 UPDATE items SET
-                  state = ?, spool_path = ?, dest_path = ?,
+                  state = ?, spool_path = ?, target_path = NULL, target_identity = NULL,
+                  dest_path = ?,
                   resolved_date = ?, date_source = ?, processed_at = ?,
                   triage_reason = NULL, last_error = NULL
                 WHERE id = ?
@@ -409,7 +441,8 @@ class Ledger:
             conn.execute(
                 """
                 UPDATE items SET
-                  state = ?, spool_path = ?, triage_reason = ?,
+                  state = ?, spool_path = ?, target_path = NULL, target_identity = NULL,
+                  triage_reason = ?,
                   date_source = ?, processed_at = ?, dest_path = NULL
                 WHERE id = ?
                 """,
@@ -493,6 +526,51 @@ class Ledger:
             )
 
 
+class Moves:
+    def __init__(self, ledger: Ledger) -> None:
+        self._ledger = ledger
+        self._last_outcome: Callable[[], None] | None = None
+
+    def __enter__(self) -> Moves:
+        return self
+
+    def __exit__(self, exc_type: type[BaseException] | None, *_: object) -> None:
+        if exc_type is None:
+            self._record_last_outcome()
+
+    def to_outbox(self, item_id: int, source: Path, target: Path, **processed: str) -> None:
+        outcome = partial(self._ledger.mark_processed, item_id, spool_path=target, **processed)
+        self._move(item_id, source, target, outcome)
+
+    def to_triage(self, item_id: int, source: Path, target: Path, *, reason: str) -> None:
+        outcome = partial(self._ledger.mark_triaged, item_id, spool_path=target, reason=reason)
+        self._move(item_id, source, target, outcome)
+
+    def _record_last_outcome(self) -> None:
+        if self._last_outcome:
+            self._last_outcome()
+            self._last_outcome = None
+
+    def _move(self, item_id: int, source: Path, target: Path, outcome: Callable[[], None]) -> None:
+        identity = file_identity(source)
+        with self._ledger.transaction():
+            self._record_last_outcome()
+            self._ledger.record_target(item_id, target, identity)
+        self._last_outcome = outcome
+        target.parent.mkdir(parents=True, exist_ok=True)
+        source.rename(target)
+
+
+def file_identity(path: Path) -> str | None:
+    """Size and mtime guard against a filesystem that reuses a freed inode number for a
+    new file, as ext4 does."""
+    try:
+        stat = path.stat()
+    except OSError:
+        return None
+    return f"{stat.st_dev}:{stat.st_ino}:{stat.st_size}:{stat.st_mtime_ns}"
+
+
 def _parse_time(value: str | None) -> datetime | None:
     return datetime.fromisoformat(value) if value else None
 
@@ -508,4 +586,6 @@ def _row_to_item(row: sqlite3.Row) -> Item:
         spool_path=row["spool_path"],
         dest_path=row["dest_path"],
         triage_reason=row["triage_reason"],
+        target_path=row["target_path"],
+        target_identity=row["target_identity"],
     )
