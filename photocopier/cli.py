@@ -136,7 +136,12 @@ def build_parser() -> argparse.ArgumentParser:
     status_parser.add_argument(
         "--verify",
         action="store_true",
-        help="also check every delivered file is still on the NAS (read-only)",
+        help="also check every delivered file is still on the NAS, unchanged (reads the NAS)",
+    )
+    status_parser.add_argument(
+        "--backfill-hashes",
+        action="store_true",
+        help="with --verify, hash files delivered before hashes were kept, once (reads each)",
     )
     status_parser.add_argument(
         "--silent-days",
@@ -451,7 +456,9 @@ def cmd_status(args: argparse.Namespace) -> int:
         if staged:
             print(f"{staged} file(s) staged in the outbox awaiting delivery")
 
-        verified = verify_delivered(cfg, ledger) if args.verify else None
+        verified = (
+            verify_delivered(cfg, ledger, backfill=args.backfill_hashes) if args.verify else None
+        )
         print()
         metrics = compute(ledger)
         print("\n".join(render_metrics(metrics, verified)))

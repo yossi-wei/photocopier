@@ -420,9 +420,14 @@ As built (`metrics.py`):
 - **Manual minutes** are not measurable, so they are counted as interventions: manual,
   non-dry-run commands in the last 30 days.
 - **Spool drain** is reported as the age of the oldest undelivered file.
-- **Lost or overwritten** is checked only by `status --verify`, which stats every
-  delivered file on the NAS (about a minute for 4,000 files over SMB), behind the same
-  mount guard as flush. *Misfiled* cannot be checked by a machine and is not claimed.
+- **Lost or overwritten** is checked only by `status --verify`, behind the same mount
+  guard as flush. Each delivered row keeps the SHA-256 of the bytes delivered
+  (`dest_sha256`, from schema 3), and `--verify` re-hashes the file on the NAS, so a
+  same-size overwrite is caught. That reads every such file in full over SMB, so it is a
+  deliberate check, not something the scheduled job runs. Rows delivered before schema 3
+  have no hash and are checked by size (about a minute for 4,000 files) and counted as
+  `size only`; `--verify --backfill-hashes` hashes them once. *Misfiled* cannot be checked
+  by a machine and is not claimed.
 - **The unattended streak** is defined in D13.
 
 ---
