@@ -196,7 +196,23 @@ fi
 
 # -- the pipeline --------------------------------------------------------------------
 failures=()
+# What identifies each failure across passes: the step, how it ended, and which sources
+# failed. Never counts, sizes or times, which change on every pass of the same failure.
+failure_keys=()
 step_out=""
+failure_key() {  # name, outcome, output
+  local detail
+  if [ "$1" = ingest ]; then
+    detail="$(printf '%s\n' "$3" | awk '
+      /^[^ ]+: (would )?ingest/ { src = $1; sub(/:$/, "", src) }
+      /^ +[0-9]+ failed, will retry/ { print "copy:" src }
+      /^error: listing failed for / { sub(/^error: listing failed for /, ""); print "listing:" $0 }
+    ' | sort -u | tr '\n' ' ')"
+  else
+    detail="$(printf '%s\n' "$3" | grep '^error: ' | tail -1 | tr -d '0-9')"
+  fi
+  failure_keys+=("$1 $2 $detail")
+}
 step() {  # name, timeout seconds, args...
   local name="$1" secs="$2"; shift 2
   log "== $name"
@@ -204,8 +220,11 @@ step() {  # name, timeout seconds, args...
   out="$(caffeinate -i perl -e "$LIMIT_PL" "$secs" "$STEP_KILL_GRACE" "$BIN" "$@" 2>&1)" || rc=$?
   printf '%s\n' "$out" | tee -a "$run_log" >/dev/null
   step_out+="[$name]"$'\n'"$out"$'\n\n'
-  if [ "$rc" -eq 142 ]; then failures+=("$name timed out after ${secs}s")
-  elif [ "$rc" -ne 0 ]; then failures+=("$name exited $rc: $(printf '%s' "$out" | tail -2 | tr '\n' ' ')"); fi
+  if [ "$rc" -eq 142 ]; then failures+=("$name timed out after ${secs}s"); failure_key "$name" timeout ""
+  elif [ "$rc" -ne 0 ]; then
+    failures+=("$name exited $rc: $(printf '%s' "$out" | tail -2 | tr '\n' ' ')")
+    failure_key "$name" "exit $rc" "$out"
+  fi
 }
 
 step ingest  21600 ingest  ${dry[@]+"${dry[@]}"}
@@ -219,8 +238,12 @@ fi
 # -- reporting ------------------------------------------------------------------------
 status_rc=0
 status_out="$(run_limited "$STATUS_TIMEOUT" "$STEP_KILL_GRACE" "$BIN" status ${silent_days[@]+"${silent_days[@]}"} 2>&1)" || status_rc=$?
-if [ "$status_rc" -eq 142 ]; then failures+=("status timed out after ${STATUS_TIMEOUT}s")
-elif [ "$status_rc" -ne 0 ]; then failures+=("status exited $status_rc: $(printf '%s' "$status_out" | tail -2 | tr '\n' ' ')"); fi
+if [ "$status_rc" -eq 142 ]; then
+  failures+=("status timed out after ${STATUS_TIMEOUT}s"); failure_key status timeout ""
+elif [ "$status_rc" -ne 0 ]; then
+  failures+=("status exited $status_rc: $(printf '%s' "$status_out" | tail -2 | tr '\n' ' ')")
+  failure_key status "exit $status_rc" "$status_out"
+fi
 oldest=""
 if command -v sqlite3 >/dev/null && [ -f "$SPOOL/ledger.db" ]; then
   # Not -readonly: the ledger is in WAL mode, and a read-only connection cannot create the
@@ -257,13 +280,17 @@ compose() {
   echo "Log: $run_log"
 }
 
+# Same failure at most once per 24 h, so a six-hourly job cannot flood the inbox. A summary
+# that carries the failure counts as its email.
+key="$(printf '%s\n' ${failure_keys[@]+"${failure_keys[@]}"} | sort | shasum | cut -c1-16)"
 if [ -n "$summary_due" ]; then
   verdict="OK"; [ -n "$problem" ] && verdict="needs attention"
   subj="photocopier daily summary on $(hostname -s): $verdict"
-  notify "$subj" "$(compose)" && echo "$today" > "$STATE_DIR/summary-date"
+  if notify "$subj" "$(compose)"; then
+    echo "$today" > "$STATE_DIR/summary-date"
+    [ ${#failures[@]} -gt 0 ] && echo "$key $(date +%s)" > "$STATE_DIR/last-failure"
+  fi
 elif [ ${#failures[@]} -gt 0 ]; then
-  # Same failure at most once per 24 h, so a six-hourly job cannot flood the inbox.
-  key="$(printf '%s' "${failures[*]}" | shasum | cut -c1-16)"
   last="$(cat "$STATE_DIR/last-failure" 2>/dev/null || true)"
   if [ "${last%% *}" != "$key" ] || [ $(( $(date +%s) - ${last##* } )) -gt 86400 ]; then
     notify "photocopier failed on $(hostname -s)" "$(compose)" && echo "$key $(date +%s)" > "$STATE_DIR/last-failure"
