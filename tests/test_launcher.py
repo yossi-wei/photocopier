@@ -549,3 +549,53 @@ class TestLauncherTimeouts:
         log = scheduled.run_log()
         assert 'STATUS_TIMEOUT="abc" is not a whole number of seconds' in log
         assert "status timed out" not in scheduled.bodies()
+
+
+def failure_subjects(p: Pass) -> list[str]:
+    return [s for s in p.subjects() if s.startswith("photocopier failed")]
+
+
+def fail_listing(*paths: str) -> dict[str, str]:
+    return {"FAKE_RCLONE_FAIL_LSJSON": ",".join(paths)}
+
+
+class TestLauncherFailureDedupe:
+    def test_same_failure_is_emailed_once_in_24_hours(self, scheduled: Pass) -> None:
+        """The key hashed the step's last two output lines, which carry the run's ingest
+        totals and spool usage, so the same failure looked new on every pass."""
+        scheduled.set_summary_date(date.today())
+        for _ in range(3):
+            scheduled.run(FAIL_VIDEO_COPY)
+        assert len(failure_subjects(scheduled)) == 1, scheduled.bodies()
+
+    def test_failure_already_in_todays_summary_is_not_emailed_again(
+        self, scheduled: Pass
+    ) -> None:
+        """The day's first pass sent the summary with FAILURES in it but never wrote
+        last-failure, so the second pass emailed the same failure again."""
+        scheduled.set_summary_date(date.today() - timedelta(days=1))
+        scheduled.run(FAIL_VIDEO_COPY)
+        assert any("needs attention" in s for s in scheduled.subjects()), "setup"
+        scheduled.run(FAIL_VIDEO_COPY)
+        assert failure_subjects(scheduled) == [], scheduled.bodies()
+
+    def test_a_different_failure_is_emailed(self, scheduled: Pass) -> None:
+        scheduled.set_summary_date(date.today())
+        scheduled.run(fail_listing(CAMERA_ROLL))
+        scheduled.run(fail_listing(CAMERA_ROLL, PHONE_2))
+        scheduled.run(fail_listing(PHONE_2))
+        assert len(failure_subjects(scheduled)) == 3, scheduled.bodies()
+
+    def test_same_failure_a_day_later_is_emailed_again(self, scheduled: Pass) -> None:
+        scheduled.set_summary_date(date.today())
+        scheduled.run(FAIL_VIDEO_COPY)
+        key = (scheduled.state / "last-failure").read_text().split()[0]
+        stale = int(time.time()) - 25 * 3600
+        (scheduled.state / "last-failure").write_text(f"{key} {stale}\n")
+        scheduled.run(FAIL_VIDEO_COPY)
+        assert len(failure_subjects(scheduled)) == 2
+
+    def test_summary_without_failures_leaves_no_failure_key(self, scheduled: Pass) -> None:
+        scheduled.set_summary_date(date.today() - timedelta(days=1))
+        scheduled.run()
+        assert not (scheduled.state / "last-failure").exists()
