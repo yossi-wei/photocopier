@@ -100,7 +100,9 @@ needed triage, and `--verify` found all 4,158 on the NAS.
 `scripts/photocopier-run.sh` runs one full pass (`ingest`, `process`, `flush`) the way a
 scheduler needs it, and is configured only through environment variables (see its header):
 
-- takes a lock shared with other NAS jobs and skips the pass if another job holds it;
+- takes a lock shared with other NAS jobs and skips the pass if another job holds it. A
+  lock left by a crashed pass is taken over once its pid belongs to another process, and a
+  lock another job has held for more than `LOCK_ALERT_HOURS` (24) is emailed about once a day;
 - mounts the share first if `NAS_URL` is set and it is not mounted: up to three rounds, also
   trying the Bonjour name (`host.local`) for a bare host name, which often fails to resolve
   after a restart or a trip;
