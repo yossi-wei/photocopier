@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import shutil
 import sqlite3
 from contextlib import closing
@@ -13,7 +14,7 @@ from photocopier.ledger import SCHEMA, Item, Ledger, State
 from photocopier.process import process
 from photocopier.rclone import Rclone
 from photocopier.spool import Spool
-from photocopier.triage import DEST_CONFLICT, NO_DATE, UNKNOWN_TYPE, Triage
+from photocopier.triage import DEST_CONFLICT, NO_DATE, UNKNOWN_TYPE, UNTRACKED, Triage
 
 from .conftest import FIXTURES, make_config, populate, write_file
 from .test_flush import (
@@ -51,6 +52,21 @@ def incoming_files(spool: Spool) -> set[str]:
     return {
         str(p.relative_to(spool.incoming)) for p in spool.incoming.rglob("*") if p.is_file()
     }
+
+
+def truncated_stat(suffix: str):
+    """Path.stat that reports a file ending in `suffix` one byte short, as a cut copy."""
+    real = Path.stat
+
+    def stat(self, *args, **kwargs):
+        result = real(self, *args, **kwargs)
+        if str(self).endswith(suffix) and "incoming" in str(self):
+            fields = list(result)
+            fields[6] -= 1
+            return os.stat_result(fields)
+        return result
+
+    return stat
 
 
 def place(remote_root: Path, rel: str, fixture: str) -> None:
@@ -278,14 +294,84 @@ class TestStrayIncoming:
         assert incoming_files(spool) == set()
         assert len(nas_files(nas)) == 1
 
-    def test_unrecorded_incoming_file_is_kept(self, config, spool: Spool) -> None:
-        orphan = spool.source_incoming("phone-1") / f"2026/11/{self.NAME}"
-        orphan.parent.mkdir(parents=True)
-        shutil.copy2(FIXTURES / self.NAME, orphan)
+    def orphan(self, spool: Spool, rel: str | None = None) -> Path:
+        """A file ingest copied into incoming/ but was killed before recording."""
+        path = spool.source_incoming("phone-1") / (rel or f"2026/11/{self.NAME}")
+        path.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(FIXTURES / self.NAME, path)
+        return path
 
+    def test_unrecorded_incoming_file_is_triaged_as_untracked(
+        self, config, spool: Spool
+    ) -> None:
+        """It used to be kept in incoming/ with no ledger row, so nothing ever filed it,
+        listed it, or counted it."""
+        orphan = self.orphan(spool)
+        content = orphan.read_bytes()
+
+        result = run_process(config, spool)
+
+        assert [reason for _item, reason in result.triaged] == [UNTRACKED]
+        assert incoming_files(spool) == set()
+        kept = spool.triage / UNTRACKED / "phone-1" / f"2026/11/{self.NAME}"
+        assert kept.read_bytes() == content
+        with Ledger(spool.ledger_path) as ledger:
+            (item,) = ledger.items_in_state(State.TRIAGED)
+        assert (item.triage_reason, item.src_path) == (UNTRACKED, f"2026/11/{self.NAME}")
+        assert item.spool_path == str(kept)
+
+    def test_untracked_file_under_a_version_folder_keeps_its_source_path(
+        self, config, spool: Spool
+    ) -> None:
+        self.orphan(spool, f"0123456789abcdef/2026/11/{self.NAME}")
         run_process(config, spool)
+        with Ledger(spool.ledger_path) as ledger:
+            (item,) = ledger.items_in_state(State.TRIAGED)
+        assert item.src_path == f"2026/11/{self.NAME}"
 
+    def test_untracked_file_is_left_alone_by_a_dry_run(self, config, spool: Spool) -> None:
+        orphan = self.orphan(spool)
+        result = run_process(config, spool, dry_run=True)
+        assert [reason for _item, reason in result.triaged] == [UNTRACKED]
         assert orphan.is_file()
+        with Ledger(spool.ledger_path) as ledger:
+            assert ledger.items_in_state(State.TRIAGED) == []
+
+    def test_untracked_copy_of_a_waiting_version_is_dropped(
+        self, config, spool: Spool, remote_root: Path
+    ) -> None:
+        """A kill before the record leaves the first copy; the retry lands the same bytes
+        under a version folder and records that one."""
+        place(remote_root, f"2026/11/{self.NAME}", self.NAME)
+        self.orphan(spool)
+        run_ingest(config, spool)
+
+        result = run_process(config, spool)
+
+        assert result.triaged == []
+        assert incoming_files(spool) == set()
+        assert len(outbox_files(spool)) == 1
+
+    def test_rclone_partial_is_not_admitted(self, config, spool: Spool) -> None:
+        partial = self.orphan(spool, f"2026/11/{self.NAME}.partial")
+        result = run_process(config, spool)
+        assert result.triaged == []
+        assert partial.is_file()
+
+    def test_bytes_a_failed_copy_left_are_left_for_the_retry(
+        self, config, spool: Spool, remote_root: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        place(remote_root, f"2026/11/{self.NAME}", self.NAME)
+        monkeypatch.setattr(Path, "stat", truncated_stat(f"2026/11/{self.NAME}"))
+        run_ingest(config, spool)
+        monkeypatch.undo()
+        with Ledger(spool.ledger_path) as ledger:
+            assert len(ledger.items_in_state(State.FAILED)) == 1
+
+        result = run_process(config, spool)
+
+        assert result.triaged == []
+        assert incoming_files(spool) == {f"phone-1/2026/11/{self.NAME}"}
 
 
 class TestKilledProcess:

@@ -109,6 +109,13 @@ earlier version still waits at its path, the new version goes under
 `<source-id>/<version>/`, where `<version>` is the first 16 hex digits of the SHA-256 of
 the remote's hash. The ledger records each version's own spool path.
 
+An ingest killed after a copy lands but before its ledger row is written leaves a file in
+`incoming/` that the ledger never saw. If the phone then replaces that file, no later
+listing names those bytes again. So `process` gives every such file a ledger row (keyed by
+its own SHA-256) and triages it as `untracked`, unless the same bytes are already
+downstream or still waiting under a recorded version, in which case it is dropped. rclone
+`.partial` files and bytes a failed copy left behind stay put for the retry.
+
 `incoming/` and `outbox/` **must be on the same filesystem** so stage 2 is `rename()`,
 not a byte copy. Enforced at startup, not assumed.
 
@@ -225,6 +232,7 @@ zeroed timestamps. These must land in triage, not in `photos/1969/`.
 | video ext, date resolved | `video/YYYY/<stem>_<suffix>.<ext>` |
 | no date | `triage/no_date/` |
 | unknown ext | `triage/unknown_type/` |
+| in `incoming/` with no ledger row | `triage/untracked/` |
 
 ### Conflict policy at the destination
 
@@ -254,6 +262,7 @@ triage/
   no_date/
   dest_conflict/
   unknown_type/
+  untracked/
   manifest.json
 ```
 

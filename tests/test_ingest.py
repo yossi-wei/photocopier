@@ -586,3 +586,29 @@ class TestListingFailureMessage:
         )
         assert len(err.report()) <= 1000, f"report is {len(err.report())} chars"
 
+
+class TestKillBetweenCopyAndRecord:
+    def test_version_landed_but_unrecorded_is_not_orphaned_by_a_reupload(
+        self, wired, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """v1 lands in incoming/, the run is killed before the ledger row is written, then the
+        phone overwrites the file with v2 before the next pass. v1's bytes must still reach
+        the library or triage, never sit untracked in incoming/."""
+        config, spool, nas, remote = wired
+        v1, v2 = b"A" * 3000, b"B" * 3200
+        write_file(remote / CAMERA_ROLL / PHOTO, v1)
+
+        def killed(*_args, **_kwargs):
+            raise KeyboardInterrupt("killed between copy and record")
+
+        with monkeypatch.context() as patch:
+            patch.setattr(Ledger, "record_ingested", killed)
+            with pytest.raises(KeyboardInterrupt):
+                run_ingest(config, spool)
+
+        write_file(remote / CAMERA_ROLL / PHOTO, v2)
+        for _ in range(2):
+            scheduled_pass(config, spool)
+
+        assert {v1, v2} <= in_library_or_triage(spool, nas), where(spool, nas)
+
