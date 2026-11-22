@@ -544,6 +544,30 @@ class TestLauncherTimeouts:
         scheduled.run()
         assert "process exited 3: boom" in scheduled.bodies(), scheduled.bodies()
 
+    def test_every_step_holds_the_mac_awake_through_a_dark_wake(
+        self, scheduled: Pass, tmp_path: Path
+    ) -> None:
+        """caffeinate -i alone let the Mac sleep a second into a pass launchd started in a
+        dark wake; two NAS copies then failed with EINVAL. -s is what holds a dark wake."""
+        calls = tmp_path / "caffeinate.log"
+        shim = scheduled.shims / "caffeinate"
+        shim.write_text(
+            "#!/bin/sh\n"
+            f'flags=""; while [ "${{1#-}}" != "$1" ]; do flags="$flags $1"; shift; done\n'
+            # After the flags: perl -e <script> <secs> <grace> <bin> <step> ...
+            f'echo "$flags :: $7" >> {shlex.quote(str(calls))}\n'
+            'exec "$@"\n',
+            encoding="utf-8",
+        )
+        scheduled.run()
+        lines = calls.read_text(encoding="utf-8").splitlines()
+        steps = [line.split(" :: ", 1)[1] for line in lines]
+        # No SMB share is mounted here, so the launcher skips flush; flush runs through the
+        # same step() call.
+        assert steps == ["ingest", "process"], lines
+        for line in lines:
+            assert set(line.split(" :: ")[0].split()) >= {"-i", "-s"}, line
+
     def test_malformed_limit_falls_back_to_the_default(self, scheduled: Pass) -> None:
         scheduled.run({"STATUS_TIMEOUT": "abc"})
         log = scheduled.run_log()

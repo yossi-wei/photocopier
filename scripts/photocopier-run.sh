@@ -217,7 +217,11 @@ step() {  # name, timeout seconds, args...
   local name="$1" secs="$2"; shift 2
   log "== $name"
   local out rc=0
-  out="$(caffeinate -i perl -e "$LIMIT_PL" "$secs" "$STEP_KILL_GRACE" "$BIN" "$@" 2>&1)" || rc=$?
+  # launchd often starts a pass in a dark wake, a brief maintenance wake with the display
+  # off. -i alone does not hold one: the Mac slept a second into such a pass, ran it in
+  # 20-second slivers for two hours, and two NAS copies failed with EINVAL as the share
+  # dropped. -s holds a dark wake, on AC power only; -i still covers a full wake on battery.
+  out="$(caffeinate -i -s perl -e "$LIMIT_PL" "$secs" "$STEP_KILL_GRACE" "$BIN" "$@" 2>&1)" || rc=$?
   printf '%s\n' "$out" | tee -a "$run_log" >/dev/null
   step_out+="[$name]"$'\n'"$out"$'\n\n'
   if [ "$rc" -eq 142 ]; then failures+=("$name timed out after ${secs}s"); failure_key "$name" timeout ""
