@@ -15,20 +15,28 @@ safe; the reverse would leave a triaged row pointing at nothing. See D11.
 
 from __future__ import annotations
 
+import os
+import shutil
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
 
 from .config import Config, expand
 from .errors import GuardError, LedgerError
 from .flush import destination_root
 from .guards import check_mount_live
-from .layout import PHOTOS, VIDEO, file_digest, same_content
+from .layout import PHOTOS, VIDEO, file_digest, same_content, variant_dest
 from .ledger import Item, Ledger, State
 from .spool import Spool
-from .triage import Triage, TriageEntry
+from .triage import DEST_CONFLICT, Triage, TriageEntry, conflict_target
 
 FILED = "filed"
 DISCARDED = "discarded"
+KEPT_BOTH = "kept_both"
+
+# Written next to the variant while it is copied, so a crash never leaves a plausible
+# file at the real outbox name. Same idea as flush's TEMP_SUFFIX.
+KEEP_BOTH_SUFFIX = ".keepboth.part"
 
 
 @dataclass(frozen=True)
@@ -38,6 +46,8 @@ class Pending:
     item: Item
     path: Path | None
     entry: TriageEntry | None
+    # The file a dest_conflict collided with. None when the manifest does not name one.
+    existing: Path | None = None
 
     @property
     def present(self) -> bool:
@@ -53,7 +63,7 @@ class Resolution:
     dry_run: bool = False
 
 
-def pending(ledger: Ledger, triage: Triage) -> list[Pending]:
+def pending(ledger: Ledger, triage: Triage, outbox: Path | None = None) -> list[Pending]:
     triage.settle(ledger)
     entries = triage.lookup()
     out: list[Pending] = []
@@ -62,8 +72,25 @@ def pending(ledger: Ledger, triage: Triage) -> list[Pending]:
         entry = None
         if path is not None and triage.root in path.parents:
             entry = entries.get(str(path.relative_to(triage.root)))
-        out.append(Pending(item=item, path=path, entry=entry))
+        existing = _existing_for(item, entry, outbox)
+        out.append(Pending(item=item, path=path, entry=entry, existing=existing))
     return out
+
+
+def _existing_for(item: Item, entry: TriageEntry | None, outbox: Path | None) -> Path | None:
+    """The file a dest_conflict collided with, as the manifest names it.
+
+    A process-time conflict names a path relative to the outbox, and a flush-time one names
+    the absolute path on the share. Only the path is worked out here; nothing is read.
+    """
+    if item.triage_reason != DEST_CONFLICT or entry is None:
+        return None
+    named = conflict_target(entry.detail)
+    if named is None:
+        return None
+    if Path(named).is_absolute():
+        return Path(named)
+    return outbox / named if outbox is not None else None
 
 
 def filed_location(config: Config, raw: str) -> tuple[Path, str]:
@@ -132,6 +159,61 @@ def resolve_filed(
     return Resolution(item, FILED, copy, dest_path=dest_path, dry_run=dry_run)
 
 
+def resolve_keep_both(
+    config: Config,
+    ledger: Ledger,
+    spool: Spool,
+    item_id: int,
+    *,
+    dry_run: bool = False,
+) -> Resolution:
+    """Keep the triaged copy next to the file already at its destination.
+
+    The copy is re-staged in the outbox under a hash-suffixed name and the row goes back
+    to processed, so the next flush delivers it through its usual guards. Nothing here
+    touches the library, so this works while the share is unmounted.
+
+    Ordering matches D11: stage the copy, then write the ledger, then delete the triage
+    copy. A crash after the copy leaves a harmless outbox file that a re-run reuses.
+    """
+    item = _triaged(ledger, item_id)
+    if item.triage_reason != DEST_CONFLICT:
+        raise GuardError(
+            f"#{item.id} is held for {item.triage_reason or 'an unknown reason'}; only a "
+            "dest_conflict has a file to keep both of"
+        )
+    copy = _triaged_copy(item, spool)
+    if copy is None:
+        raise GuardError(
+            f"#{item.id}'s triaged copy is gone, so there is nothing to keep; "
+            "use --discard to close it out"
+        )
+
+    entry = _manifest_entry(spool, item)
+    named = conflict_target(entry.detail) if entry else None
+    if named is None:
+        raise GuardError(
+            f"the manifest does not say which file #{item.id} conflicts with; "
+            "file it by hand with --filed-at instead"
+        )
+    _target, conflict_dest = filed_location(config, named)
+
+    variant = variant_dest(conflict_dest, file_digest(copy))
+    staged = spool.outbox / variant
+    if staged.exists():
+        if not same_content(staged, copy):
+            raise GuardError(
+                f"{staged} already exists with different content; nothing changed"
+            )
+    elif not dry_run:
+        _stage_copy(copy, staged)
+
+    if not dry_run:
+        ledger.restage(item.id, spool_path=staged, dest_path=variant)
+        _remove(copy, spool.triage)
+    return Resolution(item, KEPT_BOTH, copy, dest_path=variant, dry_run=dry_run)
+
+
 def resolve_discard(
     ledger: Ledger,
     spool: Spool,
@@ -155,6 +237,26 @@ def _triaged(ledger: Ledger, item_id: int) -> Item:
     if item.state != State.TRIAGED:
         raise LedgerError(f"item #{item_id} is {item.state.value}, not triaged")
     return item
+
+
+def _manifest_entry(spool: Spool, item: Item) -> TriageEntry | None:
+    if not item.spool_path:
+        return None
+    path = Path(item.spool_path)
+    if spool.triage not in path.parents:
+        return None
+    return Triage(spool.triage).lookup().get(str(path.relative_to(spool.triage)))
+
+
+def _stage_copy(source: Path, target: Path) -> None:
+    target.parent.mkdir(parents=True, exist_ok=True)
+    partial = target.with_name(target.name + KEEP_BOTH_SUFFIX)
+    try:
+        shutil.copy2(source, partial)
+        os.replace(partial, target)
+    except Exception:
+        partial.unlink(missing_ok=True)
+        raise
 
 
 def _triaged_copy(item: Item, spool: Spool) -> Path | None:
@@ -202,20 +304,52 @@ def render_pending(items: list[Pending], triage_root: Path) -> str:
         where = str(p.path) if p.path else "(no path recorded)"
         lines.append(f"    file    {where}{'' if p.present else '  (missing)'}")
         lines.append(f"    why     {p.entry.detail if p.entry else '(no manifest entry)'}")
+        if p.item.triage_reason == DEST_CONFLICT:
+            lines.append(f"    compare  {_compare(p)}")
 
     lines += [
         "",
         "close one out with:",
         "  photocopier resolve <id> --filed-at <path>   after filing it in the library",
+        "  photocopier resolve <id> --keep-both         to keep both: files the triaged copy next "
+        "to the existing one under a hash-suffixed name",
         "  photocopier resolve <id> --discard           to drop it; it is not fetched again",
     ]
     return "\n".join(lines)
 
 
+def _compare(p: Pending) -> str:
+    triaged = _describe(p.path) if p.present else None
+    existing = _describe(p.existing)
+    return f"triaged {triaged or '(missing)'}  |  existing {existing or '(not reachable)'}"
+
+
+def _describe(path: Path | None) -> str | None:
+    """Size and local modification time, from a stat alone. None if it cannot be statted.
+
+    A stat on an unmounted share's empty mount point fails the same way a missing file does,
+    so both read as not reachable.
+    """
+    if path is None:
+        return None
+    try:
+        stat = path.stat()
+    except OSError:
+        return None
+    when = datetime.fromtimestamp(stat.st_mtime).strftime("%Y-%m-%d %H:%M")
+    return f"{stat.st_size} bytes, {when}"
+
+
 def render(result: Resolution) -> str:
     mark, remove = ("would mark", "would remove") if result.dry_run else ("marked", "removed")
     item = result.item
-    if result.outcome == FILED:
+    if result.outcome == KEPT_BOTH:
+        verb = "would re-stage" if result.dry_run else "re-staged"
+        lines = [
+            f"#{item.id} {verb} as {result.dest_path}; "
+            "the next flush delivers it next to the existing file"
+        ]
+    elif result.outcome == FILED:
         lines = [f"#{item.id} {mark} delivered at {result.dest_path}"]
     else:
         lines = [f"#{item.id} {mark} discarded; it will not be fetched again"]
