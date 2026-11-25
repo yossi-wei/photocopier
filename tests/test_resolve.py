@@ -8,6 +8,7 @@ close out keeps the alert email firing forever.
 from __future__ import annotations
 
 import os
+import re
 import shutil
 from pathlib import Path
 
@@ -17,7 +18,7 @@ from photocopier.cli import main
 from photocopier.errors import GuardError, LedgerError
 from photocopier.flush import flush
 from photocopier.ingest import ingest
-from photocopier.layout import file_digest
+from photocopier.layout import file_digest, variant_dest
 from photocopier.ledger import Ledger, State
 from photocopier.process import process
 from photocopier.rclone import Rclone
@@ -27,6 +28,7 @@ from photocopier.resolve import (
     render_pending,
     resolve_discard,
     resolve_filed,
+    resolve_keep_both,
 )
 from photocopier.spool import Spool
 from photocopier.triage import DEST_CONFLICT, NO_DATE, Triage, conflict_detail, conflict_target
@@ -366,26 +368,27 @@ class TestDiscard:
         assert row(spool, item.id)["state"] == State.TRIAGED.value
 
 
+# D5's case three: a different file already sits at the target path.
+CONFLICT_NAME = "2026/06/PXL_20260615_101500.jpg"
+CONFLICT_TARGET = "photos/2026/06/PXL_20260615_101500_phone-1.jpg"
+
+
+@pytest.fixture
+def conflicted(wired):
+    config, spool, nas, remote = wired
+    populate(remote / CAMERA_ROLL, {CONFLICT_NAME: 128})
+    pump(config, spool)
+    existing = nas / CONFLICT_TARGET
+    existing.parent.mkdir(parents=True, exist_ok=True)
+    existing.write_bytes(b"a different photo that happens to share the name")
+    with Ledger(spool.ledger_path) as ledger:
+        assert flush(config, ledger, spool).conflicts
+    copy = spool.triage / DEST_CONFLICT / "phone-1" / CONFLICT_NAME
+    assert copy.is_file()
+    return config, spool, nas, existing, copy, only_triaged(spool)
+
+
 class TestDestConflict:
-    """D5's case three: a different file already sits at the target path."""
-
-    NAME = "2026/06/PXL_20260615_101500.jpg"
-    TARGET = "photos/2026/06/PXL_20260615_101500_phone-1.jpg"
-
-    @pytest.fixture
-    def conflicted(self, wired):
-        config, spool, nas, remote = wired
-        populate(remote / CAMERA_ROLL, {self.NAME: 128})
-        pump(config, spool)
-        existing = nas / self.TARGET
-        existing.parent.mkdir(parents=True, exist_ok=True)
-        existing.write_bytes(b"a different photo that happens to share the name")
-        with Ledger(spool.ledger_path) as ledger:
-            assert flush(config, ledger, spool).conflicts
-        copy = spool.triage / DEST_CONFLICT / "phone-1" / self.NAME
-        assert copy.is_file()
-        return config, spool, nas, existing, copy, only_triaged(spool)
-
     def test_list_names_the_existing_target(self, conflicted) -> None:
         _config, spool, _nas, existing, copy, item = conflicted
         with Ledger(spool.ledger_path) as ledger:
@@ -432,6 +435,154 @@ class TestDestConflict:
         assert row(spool, item.id)["state"] == State.DISCARDED.value
         assert not copy.exists()
         assert existing.read_bytes() == original
+
+
+class TestKeepBoth:
+    def test_flush_time_conflict_is_kept_then_both_delivered(self, conflicted) -> None:
+        config, spool, nas, existing, copy, item = conflicted
+        triaged_bytes = copy.read_bytes()
+        original = existing.read_bytes()
+        assert row(spool, item.id)["dest_path"] is None, "triaged rows never carry a dest_path"
+
+        with Ledger(spool.ledger_path) as ledger:
+            result = resolve_keep_both(config, ledger, spool, item.id)
+
+        variant = result.dest_path
+        assert re.fullmatch(r"photos/2026/06/PXL_20260615_101500_phone-1~[0-9a-f]{8}\.jpg", variant)
+        assert (spool.outbox / variant).read_bytes() == triaged_bytes
+        after = row(spool, item.id)
+        assert after["state"] == State.PROCESSED.value
+        assert after["dest_path"] == variant
+        assert after["triage_reason"] == DEST_CONFLICT, "why it was held stays on record"
+        assert not copy.exists()
+        assert existing.read_bytes() == original
+
+        with Ledger(spool.ledger_path) as ledger:
+            flushed = flush(config, ledger, spool)
+        assert len(flushed.delivered) == 1
+        assert (nas / variant).read_bytes() == triaged_bytes
+        assert existing.read_bytes() == original
+        after = row(spool, item.id)
+        assert after["state"] == State.DELIVERED.value
+        assert after["dest_sha256"] == file_digest(nas / variant)
+
+    def test_process_time_conflict_is_kept_with_the_share_unmounted(
+        self, spool_root: Path, remote_root: Path
+    ) -> None:
+        """Two different files staged to one name. Keeping both needs neither share nor flush."""
+        config = make_config(spool_root)
+        spool = Spool.from_config(config.spool)
+        spool.ensure()
+        populate(remote_root / CAMERA_ROLL, {
+            CONFLICT_NAME: 128,
+            "retake/" + CONFLICT_NAME: 200,
+        })
+        pump(config, spool)
+        item = only_triaged(spool)
+        copy = Path(item.spool_path)
+        triaged_bytes = copy.read_bytes()
+        staged_first = (spool.outbox / CONFLICT_TARGET).read_bytes()
+        assert staged_first != triaged_bytes
+
+        with Ledger(spool.ledger_path) as ledger:
+            result = resolve_keep_both(config, ledger, spool, item.id)
+
+        assert (spool.outbox / result.dest_path).read_bytes() == triaged_bytes
+        assert (spool.outbox / CONFLICT_TARGET).read_bytes() == staged_first
+        assert row(spool, item.id)["state"] == State.PROCESSED.value
+        assert not copy.exists()
+
+    def test_dry_run_changes_nothing(self, conflicted) -> None:
+        config, spool, _nas, _existing, copy, item = conflicted
+        with Ledger(spool.ledger_path) as ledger:
+            result = resolve_keep_both(config, ledger, spool, item.id, dry_run=True)
+
+        assert result.dry_run
+        assert not (spool.outbox / result.dest_path).exists()
+        assert row(spool, item.id)["state"] == State.TRIAGED.value
+        assert copy.is_file()
+
+    def test_other_reasons_are_refused(self, wired) -> None:
+        config, spool, _nas, remote = wired
+        copy = triage_undated(config, spool, remote)
+        item = only_triaged(spool)
+
+        with Ledger(spool.ledger_path) as ledger, pytest.raises(
+            GuardError, match="only a dest_conflict"
+        ):
+            resolve_keep_both(config, ledger, spool, item.id)
+        assert copy.is_file()
+        assert row(spool, item.id)["state"] == State.TRIAGED.value
+
+    def test_missing_triaged_copy_is_refused(self, conflicted) -> None:
+        config, spool, _nas, _existing, copy, item = conflicted
+        copy.unlink()
+
+        with Ledger(spool.ledger_path) as ledger, pytest.raises(
+            GuardError, match="triaged copy is gone"
+        ):
+            resolve_keep_both(config, ledger, spool, item.id)
+        assert row(spool, item.id)["state"] == State.TRIAGED.value
+
+    def test_without_a_manifest_entry_it_points_at_filed_at(self, conflicted) -> None:
+        config, spool, _nas, _existing, copy, item = conflicted
+        (spool.triage / "manifest.jsonl").unlink()
+
+        with Ledger(spool.ledger_path) as ledger, pytest.raises(GuardError, match="--filed-at"):
+            resolve_keep_both(config, ledger, spool, item.id)
+        assert copy.is_file()
+
+    def test_identical_variant_already_staged_is_reused(self, conflicted) -> None:
+        """A crash after the copy and before the ledger write leaves exactly this state."""
+        config, spool, _nas, _existing, copy, item = conflicted
+        triaged_bytes = copy.read_bytes()
+        staged = spool.outbox / variant_dest(CONFLICT_TARGET, file_digest(copy))
+        staged.parent.mkdir(parents=True)
+        shutil.copy2(copy, staged)
+
+        with Ledger(spool.ledger_path) as ledger:
+            result = resolve_keep_both(config, ledger, spool, item.id)
+
+        assert result.dest_path == staged.relative_to(spool.outbox).as_posix()
+        assert staged.read_bytes() == triaged_bytes
+        assert row(spool, item.id)["state"] == State.PROCESSED.value
+        assert not copy.exists()
+
+    def test_different_variant_already_staged_is_refused(self, conflicted) -> None:
+        config, spool, _nas, _existing, copy, item = conflicted
+        staged = spool.outbox / variant_dest(CONFLICT_TARGET, file_digest(copy))
+        staged.parent.mkdir(parents=True)
+        staged.write_bytes(b"someone else's bytes")
+
+        with Ledger(spool.ledger_path) as ledger, pytest.raises(
+            GuardError, match="different content"
+        ):
+            resolve_keep_both(config, ledger, spool, item.id)
+
+        assert staged.read_bytes() == b"someone else's bytes"
+        assert copy.is_file()
+        assert row(spool, item.id)["state"] == State.TRIAGED.value
+
+    def test_crash_before_the_ledger_write_converges_on_rerun(
+        self, conflicted, monkeypatch
+    ) -> None:
+        config, spool, _nas, _existing, copy, item = conflicted
+        triaged_bytes = copy.read_bytes()
+
+        kill_on_call(monkeypatch, Ledger, "restage")
+        with Ledger(spool.ledger_path) as ledger, pytest.raises(SimulatedSigkill):
+            resolve_keep_both(config, ledger, spool, item.id)
+        assert row(spool, item.id)["state"] == State.TRIAGED.value
+        assert copy.is_file()
+
+        monkeypatch.undo()
+        with Ledger(spool.ledger_path) as ledger:
+            result = resolve_keep_both(config, ledger, spool, item.id)
+
+        assert (spool.outbox / result.dest_path).read_bytes() == triaged_bytes
+        assert row(spool, item.id)["state"] == State.PROCESSED.value
+        assert not copy.exists()
+        assert not list(spool.outbox.rglob("*.keepboth.part"))
 
 
 class TestFiledLocation:

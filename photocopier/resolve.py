@@ -15,6 +15,8 @@ safe; the reverse would leave a triaged row pointing at nothing. See D11.
 
 from __future__ import annotations
 
+import os
+import shutil
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -22,13 +24,18 @@ from .config import Config, expand
 from .errors import GuardError, LedgerError
 from .flush import destination_root
 from .guards import check_mount_live
-from .layout import PHOTOS, VIDEO, file_digest, same_content
+from .layout import PHOTOS, VIDEO, file_digest, same_content, variant_dest
 from .ledger import Item, Ledger, State
 from .spool import Spool
-from .triage import Triage, TriageEntry
+from .triage import DEST_CONFLICT, Triage, TriageEntry, conflict_target
 
 FILED = "filed"
 DISCARDED = "discarded"
+KEPT_BOTH = "kept_both"
+
+# Written next to the variant while it is copied, so a crash never leaves a plausible
+# file at the real outbox name. Same idea as flush's TEMP_SUFFIX.
+KEEP_BOTH_SUFFIX = ".keepboth.part"
 
 
 @dataclass(frozen=True)
@@ -132,6 +139,61 @@ def resolve_filed(
     return Resolution(item, FILED, copy, dest_path=dest_path, dry_run=dry_run)
 
 
+def resolve_keep_both(
+    config: Config,
+    ledger: Ledger,
+    spool: Spool,
+    item_id: int,
+    *,
+    dry_run: bool = False,
+) -> Resolution:
+    """Keep the triaged copy next to the file already at its destination.
+
+    The copy is re-staged in the outbox under a hash-suffixed name and the row goes back
+    to processed, so the next flush delivers it through its usual guards. Nothing here
+    touches the library, so this works while the share is unmounted.
+
+    Ordering matches D11: stage the copy, then write the ledger, then delete the triage
+    copy. A crash after the copy leaves a harmless outbox file that a re-run reuses.
+    """
+    item = _triaged(ledger, item_id)
+    if item.triage_reason != DEST_CONFLICT:
+        raise GuardError(
+            f"#{item.id} is held for {item.triage_reason or 'an unknown reason'}; only a "
+            "dest_conflict has a file to keep both of"
+        )
+    copy = _triaged_copy(item, spool)
+    if copy is None:
+        raise GuardError(
+            f"#{item.id}'s triaged copy is gone, so there is nothing to keep; "
+            "use --discard to close it out"
+        )
+
+    entry = _manifest_entry(spool, item)
+    named = conflict_target(entry.detail) if entry else None
+    if named is None:
+        raise GuardError(
+            f"the manifest does not say which file #{item.id} conflicts with; "
+            "file it by hand with --filed-at instead"
+        )
+    _target, conflict_dest = filed_location(config, named)
+
+    variant = variant_dest(conflict_dest, file_digest(copy))
+    staged = spool.outbox / variant
+    if staged.exists():
+        if not same_content(staged, copy):
+            raise GuardError(
+                f"{staged} already exists with different content; nothing changed"
+            )
+    elif not dry_run:
+        _stage_copy(copy, staged)
+
+    if not dry_run:
+        ledger.restage(item.id, spool_path=staged, dest_path=variant)
+        _remove(copy, spool.triage)
+    return Resolution(item, KEPT_BOTH, copy, dest_path=variant, dry_run=dry_run)
+
+
 def resolve_discard(
     ledger: Ledger,
     spool: Spool,
@@ -155,6 +217,26 @@ def _triaged(ledger: Ledger, item_id: int) -> Item:
     if item.state != State.TRIAGED:
         raise LedgerError(f"item #{item_id} is {item.state.value}, not triaged")
     return item
+
+
+def _manifest_entry(spool: Spool, item: Item) -> TriageEntry | None:
+    if not item.spool_path:
+        return None
+    path = Path(item.spool_path)
+    if spool.triage not in path.parents:
+        return None
+    return Triage(spool.triage).lookup().get(str(path.relative_to(spool.triage)))
+
+
+def _stage_copy(source: Path, target: Path) -> None:
+    target.parent.mkdir(parents=True, exist_ok=True)
+    partial = target.with_name(target.name + KEEP_BOTH_SUFFIX)
+    try:
+        shutil.copy2(source, partial)
+        os.replace(partial, target)
+    except Exception:
+        partial.unlink(missing_ok=True)
+        raise
 
 
 def _triaged_copy(item: Item, spool: Spool) -> Path | None:
@@ -215,7 +297,13 @@ def render_pending(items: list[Pending], triage_root: Path) -> str:
 def render(result: Resolution) -> str:
     mark, remove = ("would mark", "would remove") if result.dry_run else ("marked", "removed")
     item = result.item
-    if result.outcome == FILED:
+    if result.outcome == KEPT_BOTH:
+        verb = "would re-stage" if result.dry_run else "re-staged"
+        lines = [
+            f"#{item.id} {verb} as {result.dest_path}; "
+            "the next flush delivers it next to the existing file"
+        ]
+    elif result.outcome == FILED:
         lines = [f"#{item.id} {mark} delivered at {result.dest_path}"]
     else:
         lines = [f"#{item.id} {mark} discarded; it will not be fetched again"]

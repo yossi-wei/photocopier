@@ -439,6 +439,25 @@ class Ledger:
                 ),
             )
 
+    def restage(self, item_id: int, *, spool_path: Path, dest_path: str) -> None:
+        """Send a triaged item back through flush under a new destination.
+
+        resolved_date, date_source and triage_reason stay as the record of why the item
+        was held. triage_reasons() only counts state=triaged, so the kept reason does not
+        show up as pending.
+        """
+        with self.transaction() as conn:
+            conn.execute(
+                """
+                UPDATE items SET
+                  state = ?, spool_path = ?, dest_path = ?,
+                  target_path = NULL, target_identity = NULL,
+                  processed_at = ?, last_error = NULL
+                WHERE id = ?
+                """,
+                (State.PROCESSED.value, str(spool_path), dest_path, _now(), item_id),
+            )
+
     def mark_triaged(
         self,
         item_id: int,
