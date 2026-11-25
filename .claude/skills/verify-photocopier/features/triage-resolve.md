@@ -9,11 +9,13 @@
 - `resolve-filed` marks the row `delivered` at the given library path and removes the triaged copy.
 - `resolve-filed-missing` refuses with exit 1 when nothing exists at `--filed-at`.
 - `resolve-dry` reports what would change without changing it.
+- `resolve-keep-both` re-stages a `dest_conflict` copy beside the existing file; the next `flush` delivers both.
 
 ## How to get to it (user POV)
 
 - `photocopier triage`
 - `photocopier resolve ID --discard [--dry-run]`
+- `photocopier resolve ID --keep-both [--dry-run]` (a `dest_conflict` only)
 - `photocopier resolve ID --filed-at photos/YYYY/MM/<name>` (or an absolute path under `photos_root`/`video_root`) `[--dry-run]`
 - `photocopier status` shows the `awaiting review` counts.
 
@@ -30,6 +32,7 @@ Preconditions:
 - **Filed.** Do what the user would do: `mkdir -p "$RUN/sandbox/nas/photos/2019/05" && cp "$RUN/sandbox/spool/triage/no_date/phone-1/1J1A3188.jpg" "$RUN/sandbox/nas/photos/2019/05/"`. Then run `"$V" pc "$RUN" resolve 1 --filed-at photos/2019/05/1J1A3188.jpg`, which reports `#1 marked delivered at photos/2019/05/1J1A3188.jpg`.
 - **Proof.** Run `"$V" pc "$RUN" triage`, which shows `2 item(s)` (#3, #7). Run `"$V" snapshot "$RUN" after-resolve`: row 1 is `delivered` with `dest_path photos/2019/05/1J1A3188.jpg`, row 4 is `discarded`, and `spool/triage/` holds only `garbage_date.jpg` and `zeroed.jpg`.
 - **Never refetched.** Run `"$V" pc "$RUN" ingest`, which ingests 0 files. The discarded and resolved files are still in the fake remote, but they are not downloaded again.
+- **Keep both.** Write a different file at the NAS path a processed file will take, for example `echo different > "$RUN/sandbox/nas/photos/2024/03/only_datetime_phone-1.jpg"` after `process`, then `"$V" pc "$RUN" flush`, which reports `conflicts 1 -> triage`. `triage` now shows a `compare` line with both sizes. `resolve ID --keep-both --dry-run` names the variant `..._phone-1~<8 hex>.jpg`. Run it for real (it works with the share unmounted), then `flush`. Proof is both files on `nas/`, the original unchanged, and the row `delivered` at the variant path. `resolve` on a `no_date` id exits 1 with `only a dest_conflict has a file to keep both of`.
 
 ## Gotchas
 

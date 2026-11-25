@@ -141,7 +141,7 @@ photocopier validate PATH       # check date rules against an already-filed libr
 photocopier status              # spool usage, ledger state, success metrics
 photocopier status --verify     # ...and check every delivered file is still on the NAS
 photocopier triage              # list files waiting for a decision, with ids and reasons
-photocopier resolve ID --filed-at PATH | --discard   # close one out (D11)
+photocopier resolve ID --filed-at PATH | --keep-both | --discard   # close one out (D11, D16)
 ```
 
 Run by hand in a terminal, `ingest`, `process` and `flush` draw a one-line progress

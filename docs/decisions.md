@@ -312,7 +312,8 @@ hand, existence is all that can be checked.
 
 **Rejected: `--filed-at` onto the conflicting file.** For `dest_conflict` the file
 already at the target is, by definition, different. Keeping it instead is a `--discard`;
-keeping both means filing the triaged copy under another name and pointing at that.
+keeping both means filing the triaged copy under another name and pointing at that, or
+`--keep-both` (D16).
 
 **Consequence.** Ledger first, then the spool delete, matching every other stage. A
 row never points at a deleted file; at worst a stray copy is left in triage. Nothing is
@@ -406,3 +407,36 @@ in the live ledger is hashless, so re-keying such items by size and modification
 would change ledger identity for no current user. If a hashless remote is ever added, that
 is the moment to revisit D6.
 
+## D16 — A `dest_conflict` can be kept beside the existing file by re-staging it
+
+**Context.** D5 sends a file whose destination holds different content to triage, and D11
+left two outcomes, keep the existing file (`--discard`) or file the copy under another name
+by hand. Two re-uploaded `~2` photos from one phone took the second route every time, which
+meant copying a file onto the share and then recording it.
+
+**Options.** Make flush rename the newcomer automatically. Have `resolve` write the variant
+to the share itself. Have `resolve` re-stage the variant and leave delivery to flush.
+
+**Decision.** `photocopier resolve <id> --keep-both`, decided by the operator on 2026-11-25,
+re-stages. The triaged copy is copied into the outbox as `<stem>~<first 8 hex of its
+sha256><ext>` beside the conflicting name, the row goes back to `processed` with that
+`dest_path`, and the triaged copy is deleted. The next flush delivers it through its usual
+mount guard, verified move and conflict check.
+
+**Why re-stage.** `resolve` never writes the library and needs no mount, so it works while
+the share is away. Nothing duplicates flush's guards. A variant that collides again
+(a different file at the variant name) triages again instead of overwriting.
+
+**Why a hash name.** A counter races and gives a different name after a crash. The hash
+name makes the command idempotent: the same bytes always land on the same name, and a
+variant already staged with the same bytes is reused. The ordering is D11's, copy then
+ledger then delete, so a crash leaves a stray outbox or triage file and never a row that
+points at nothing.
+
+**Why not automatic.** Whether the newcomer is a real second photo or a re-encoded copy of
+the first is the human's call, which is D5's point. `triage` now shows both files' sizes and
+modification times so the call can be made without opening the share.
+
+**Scope.** Only `dest_conflict`, from either stage. The conflicting path is read back from
+the manifest detail, so rows triaged before this existed work too. The ledger has no new
+column. A row restaged this way keeps its `triage_reason` as history.

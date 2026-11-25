@@ -271,7 +271,7 @@ triage/
 Two ways out:
 
 - **One-off** — file it by hand, then record the decision per item:
-  `photocopier resolve <id> --filed-at <path>` or `--discard` (D11). `photocopier triage`
+  `photocopier resolve <id> --filed-at <path>`, `--keep-both` (a `dest_conflict` only, D16) or `--discard` (D11). `photocopier triage`
   lists the ids.
 - **New rule** — a pattern added to config, then `photocopier reprocess` re-runs stage 2
   over the whole triage area.
