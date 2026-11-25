@@ -12,6 +12,7 @@ ever delivered. Closing out a single item once a human has decided is resolve.py
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -55,6 +56,21 @@ class TriageEntry:
             },
             ensure_ascii=False,
         )
+
+
+def conflict_detail(target: str, *, staged: bool) -> str:
+    """The manifest detail for a dest_conflict. `staged` means the target is in the outbox."""
+    where = "already staged at" if staged else "already at"
+    return f"different content {where} {target}"
+
+
+_CONFLICT_TARGET = re.compile(r"different content already (?:staged )?at (.+)")
+
+
+def conflict_target(detail: str) -> str | None:
+    """The path a dest_conflict detail names, or None for any other detail."""
+    match = _CONFLICT_TARGET.fullmatch(detail)
+    return match.group(1) if match else None
 
 
 class Triage:

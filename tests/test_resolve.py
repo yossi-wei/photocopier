@@ -29,7 +29,7 @@ from photocopier.resolve import (
     resolve_filed,
 )
 from photocopier.spool import Spool
-from photocopier.triage import DEST_CONFLICT, NO_DATE, Triage
+from photocopier.triage import DEST_CONFLICT, NO_DATE, Triage, conflict_detail, conflict_target
 
 from .conftest import FAKE_RCLONE, FIXTURES, make_config, populate
 from .test_flush import SimulatedSigkill, kill_on_call
@@ -534,3 +534,18 @@ suffix = "phone-1"
         with pytest.raises(SystemExit) as exc:
             main(["-c", str(config_file), "resolve", "1"])
         assert exc.value.code == 2
+
+
+class TestConflictDetail:
+    """flush and process write the detail; resolve reads the target back out of it."""
+
+    @pytest.mark.parametrize(
+        ("target", "staged"),
+        [("/Volumes/media/photos/2026/06/x.jpg", False), ("photos/2026/06/x.jpg", True)],
+    )
+    def test_target_round_trips(self, target: str, staged: bool) -> None:
+        assert conflict_target(conflict_detail(target, staged=staged)) == target
+
+    def test_other_details_name_no_target(self) -> None:
+        assert conflict_target("no EXIF date") is None
+        assert conflict_target("unrecognised extension: x.bin") is None

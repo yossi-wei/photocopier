@@ -65,6 +65,16 @@ def destination_for(
     return Destination(PHOTOS, PurePosixPath(PHOTOS) / f"{when:%Y}" / f"{when:%m}" / name)
 
 
+def variant_dest(dest_path: str, digest: str) -> str:
+    """A sibling of `dest_path` that cannot collide with it, named from the content.
+
+    The suffix comes from the bytes rather than a counter, so a keep-both interrupted
+    after the copy lands on the same name when it is run again.
+    """
+    path = PurePosixPath(dest_path)
+    return path.with_name(f"{path.stem}~{digest[:8]}{path.suffix}").as_posix()
+
+
 def file_digest(path: Path) -> str:
     """SHA-256 of a local file, streamed so a large video does not land in memory."""
     digest = hashlib.sha256()

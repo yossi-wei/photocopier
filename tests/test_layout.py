@@ -5,7 +5,13 @@ from pathlib import Path
 
 import pytest
 
-from photocopier.layout import destination_for, file_digest, same_content, suffixed_name
+from photocopier.layout import (
+    destination_for,
+    file_digest,
+    same_content,
+    suffixed_name,
+    variant_dest,
+)
 
 
 class TestNaming:
@@ -110,3 +116,23 @@ def test_destination_is_always_relative(kind: str) -> None:
     """The outbox is a replica; absolute paths would break the move at delivery."""
     dest = destination_for("a.jpg", kind, date(2026, 6, 1), "phone-1")
     assert not str(dest.relative).startswith("/")
+
+
+class TestVariant:
+    def test_hash_goes_before_the_extension(self) -> None:
+        assert (
+            variant_dest("photos/2026/06/PXL_20260615_101500_phone-1.jpg", "a1b2c3d4" + "0" * 56)
+            == "photos/2026/06/PXL_20260615_101500_phone-1~a1b2c3d4.jpg"
+        )
+
+    def test_camera_compound_extension_stays_in_the_stem(self) -> None:
+        assert (
+            variant_dest("photos/2026/06/PXL_x.PANO.jpg", "ffeeddcc" + "0" * 56)
+            == "photos/2026/06/PXL_x.PANO~ffeeddcc.jpg"
+        )
+
+    def test_same_content_gives_the_same_name(self) -> None:
+        digest = "ab12cd34" + "0" * 56
+        assert variant_dest("video/2025/clip.mp4", digest) == variant_dest(
+            "video/2025/clip.mp4", digest
+        )

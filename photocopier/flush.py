@@ -27,7 +27,7 @@ from .layout import PHOTOS, VIDEO, file_digest, same_content
 from .ledger import Item, Ledger, Moves, State
 from .progress import QUIET, Progress
 from .spool import Spool
-from .triage import DEST_CONFLICT, Triage
+from .triage import DEST_CONFLICT, Triage, conflict_detail
 
 TEMP_SUFFIX = ".photocopier-partial"
 
@@ -139,7 +139,7 @@ def flush_staged(
 
         result.conflicts.extend(rows)
         if not dry_run:
-            detail = f"different content already at {target}"
+            detail = conflict_detail(str(target), staged=False)
             for row in rows[:-1]:
                 copy = triage.vacant_path(DEST_CONFLICT, row)
                 copy.parent.mkdir(parents=True, exist_ok=True)

@@ -24,7 +24,15 @@ from .ledger import Item, Ledger, Moves, State
 from .progress import QUIET, Progress
 from .rclone import RemoteItem
 from .spool import Spool
-from .triage import BEFORE_CUTOFF, DEST_CONFLICT, NO_DATE, UNKNOWN_TYPE, UNTRACKED, Triage
+from .triage import (
+    BEFORE_CUTOFF,
+    DEST_CONFLICT,
+    NO_DATE,
+    UNKNOWN_TYPE,
+    UNTRACKED,
+    Triage,
+    conflict_detail,
+)
 
 # The folder ingest puts a later version under, see Spool.incoming_root_for.
 VERSION_DIR = re.compile(r"^[0-9a-f]{16}$")
@@ -126,7 +134,7 @@ def process_item(
                 _prune_empty(spool.incoming, source.parent)
             return
         _triage(item, source, DEST_CONFLICT,
-                f"different content already staged at {destination.relative}",
+                conflict_detail(str(destination.relative), staged=True),
                 triage, moves, result, spool, dry_run=dry_run)
         return
 
