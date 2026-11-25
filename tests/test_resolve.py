@@ -719,6 +719,54 @@ suffix = "phone-1"
             main(["-c", str(config_file), "resolve", "1"])
         assert exc.value.code == 2
 
+    @pytest.mark.parametrize("second", [["--discard"], ["--filed-at", "x.jpg"]])
+    def test_keep_both_excludes_the_other_outcomes(self, config_file: Path, second) -> None:
+        with pytest.raises(SystemExit) as exc:
+            main(["-c", str(config_file), "resolve", "1", "--keep-both", *second])
+        assert exc.value.code == 2
+
+    def test_keep_both_dry_run_then_real_then_flush_delivers_both(
+        self, conflicted, config_file: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        _config, spool, nas, existing, copy, item = conflicted
+        triaged_bytes = copy.read_bytes()
+        original = existing.read_bytes()
+
+        assert main(["-c", str(config_file), "resolve", str(item.id), "--keep-both",
+                     "--dry-run"]) == 0
+        assert "would re-stage as photos/2026/06/PXL_20260615_101500_phone-1~" in (
+            capsys.readouterr().out
+        )
+        assert copy.is_file()
+
+        assert main(["-c", str(config_file), "resolve", str(item.id), "--keep-both"]) == 0
+        out = capsys.readouterr().out
+        assert "re-staged as photos/2026/06/PXL_20260615_101500_phone-1~" in out
+        assert "the next flush delivers it next to the existing file" in out
+        assert "removed triaged copy" in out
+
+        assert main(["-c", str(config_file), "flush"]) == 0
+        capsys.readouterr()
+        [kept] = [p for p in (nas / "photos/2026/06").iterdir() if "~" in p.name]
+        assert kept.read_bytes() == triaged_bytes
+        assert existing.read_bytes() == original
+
+    def test_keep_both_on_another_reason_is_a_clean_error(
+        self, wired, config_file: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        config, spool, _nas, remote = wired
+        triage_undated(config, spool, remote)
+        item = only_triaged(spool)
+
+        assert main(["-c", str(config_file), "resolve", str(item.id), "--keep-both"]) == 1
+        assert "only a dest_conflict" in capsys.readouterr().err
+
+    def test_triage_lists_the_compare_line(
+        self, conflicted, config_file: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        assert main(["-c", str(config_file), "triage"]) == 0
+        assert "    compare  triaged " in capsys.readouterr().out
+
 
 class TestConflictDetail:
     """flush and process write the detail; resolve reads the target back out of it."""

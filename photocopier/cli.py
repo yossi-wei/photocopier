@@ -44,7 +44,13 @@ from .process import process
 from .process import render as render_process
 from .progress import Progress
 from .rclone import Rclone
-from .resolve import pending, render_pending, resolve_discard, resolve_filed
+from .resolve import (
+    pending,
+    render_pending,
+    resolve_discard,
+    resolve_filed,
+    resolve_keep_both,
+)
 from .resolve import render as render_resolve
 from .spool import Spool
 from .triage import Triage
@@ -164,6 +170,12 @@ def build_parser() -> argparse.ArgumentParser:
         metavar="PATH",
         help="where you filed it: an absolute path under photos_root or video_root, "
         "or photos/YYYY/MM/<name> or video/YYYY/<name>",
+    )
+    outcome.add_argument(
+        "--keep-both",
+        action="store_true",
+        help="for a dest_conflict: keep the triaged copy beside the existing file under a "
+        "hash-suffixed name; the next flush delivers it",
     )
     outcome.add_argument(
         "--discard",
@@ -488,7 +500,8 @@ def cmd_triage(args: argparse.Namespace) -> int:
         return 0
 
     with Ledger(spool.ledger_path) as ledger:
-        print(render_pending(pending(ledger, Triage(spool.triage)), spool.triage))
+        listed = pending(ledger, Triage(spool.triage), outbox=spool.outbox)
+        print(render_pending(listed, spool.triage))
     return 0
 
 
@@ -501,6 +514,8 @@ def cmd_resolve(args: argparse.Namespace) -> int:
     with Ledger(spool.ledger_path) as ledger:
         if args.discard:
             result = resolve_discard(ledger, spool, args.id, dry_run=args.dry_run)
+        elif args.keep_both:
+            result = resolve_keep_both(cfg, ledger, spool, args.id, dry_run=args.dry_run)
         else:
             result = resolve_filed(
                 cfg, ledger, spool, args.id, args.filed_at, dry_run=args.dry_run
