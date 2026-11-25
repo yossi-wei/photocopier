@@ -12,6 +12,8 @@ The launcher `scripts/photocopier-run.sh` is what launchd runs four times a day.
 - `sched-silent-source` copies the `WARNING:` lines from `photocopier status --silent-days N` into the summary. Status prints `WARNING: <source> has sent nothing for N days.` for each configured source whose newest OneDrive modified time (`src_modtime`) is more than `SOURCE_SILENT_DAYS` days old (default 7), and `WARNING: <source> has never sent a file.` for a configured source with no ledger rows. Ingest time is not the clock, because a backfill of an old file resets it. Each such line appears once, above the STATUS block, and the STATUS block leaves it out.
 - `sched-failure-dedupe` sends the same failure at most once per 24 hours.
 - `sched-scheduled-flag` marks ledger `runs` rows as `scheduled=1`, which feeds the unattended-streak metric.
+- `sched-dark-wake-skip` skips the whole pass, logging `skipped: dark wake on battery power`, when the Mac is on battery and in a dark wake (no Graphics capability in `pmset -g systemstate`). `SKIP_DARK_WAKE_ON_BATTERY=0` turns it off; a signal that cannot be read runs the pass.
+- `sched-sleep-cutoff` stops the pass after a step during which the Mac slept and woke (`sysctl -n kern.waketime` moved), does not count that step's result as a failure, and notes it in the summary.
 - `sched-dry` with `PHOTOCOPIER_DRY_RUN=1` passes `--dry-run` to every step and sends no email.
 
 ## How to get to it (user POV)
@@ -37,6 +39,7 @@ Preconditions:
 - **Second pass the same day.** Run `"$V" launcher "$RUN"` again. No new summary goes to `notify.log`, because one was already sent today and there are no failures.
 - **Scheduled flag.** Run `"$V" snapshot "$RUN" after-launcher`. The `runs` rows from the launcher have `scheduled = 1`, and `status` shows `unattended streak 1 day`.
 - **Lock held.** Run `mkdir "$RUN/sandbox/lock/lock" && echo $$ > "$RUN/sandbox/lock/lock/pid" && echo test > "$RUN/sandbox/lock/lock/job"`, then `"$V" launcher "$RUN"`. The log line is `skipped: another NAS job (test, pid ...) holds the lock` and no new `runs` rows appear. Remove the lock with `rm -rf "$RUN/sandbox/lock/lock"`.
+- **Dark wake and sleep cut-off.** The sandbox cannot put this Mac into a dark wake on battery, so stub the two commands. Put `pmset` and `sysctl` scripts in a directory outside the repo and run `"$V" launcher "$RUN" PATH="<that dir>:$PATH"`. A `pmset` stub that prints `Now drawing from 'Battery Power'` for `-g batt` and `Current System Capabilities are: CPU Network` for `-g systemstate` gives the skip line, no new `runs` rows, no lock, no email. With `CPU Graphics Audio Network` the pass runs. A `sysctl` stub that prints `{ sec = N, usec = 7 } ...` and raises N on every call makes ingest report `the Mac slept during ingest`, skips process, and puts a NOTE in the summary. Verified this way on 2026-11-24.
 - **Dry run.** Run `"$V" launcher "$RUN" PHOTOCOPIER_DRY_RUN=1`. No new `notify.log` entry; the ledger `runs` rows have `dry_run = 1`.
 
 ## Gotchas
