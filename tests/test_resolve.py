@@ -398,6 +398,39 @@ class TestDestConflict:
         assert str(copy) in output
         assert f"different content already at {existing}" in output
 
+    def test_compare_line_shows_both_files(self, conflicted) -> None:
+        _config, spool, _nas, existing, copy, item = conflicted
+        with Ledger(spool.ledger_path) as ledger:
+            output = render_pending(pending(ledger, Triage(spool.triage)), spool.triage)
+
+        triaged_size = copy.stat().st_size
+        existing_size = len(existing.read_bytes())
+        assert f"    compare  triaged {triaged_size} bytes, " in output
+        assert f"  |  existing {existing_size} bytes, " in output
+        assert "not reachable" not in output
+
+    def test_compare_line_says_when_the_existing_file_is_unreachable(self, conflicted) -> None:
+        _config, spool, _nas, existing, _copy, _item = conflicted
+        existing.unlink()
+        with Ledger(spool.ledger_path) as ledger:
+            output = render_pending(pending(ledger, Triage(spool.triage)), spool.triage)
+
+        assert "  |  existing (not reachable)" in output
+
+    def test_process_time_conflict_compares_against_the_outbox(self, wired) -> None:
+        config, spool, _nas, remote = wired
+        populate(remote / CAMERA_ROLL, {CONFLICT_NAME: 128, "retake/" + CONFLICT_NAME: 200})
+        pump(config, spool)
+        item = only_triaged(spool)
+        staged = spool.outbox / CONFLICT_TARGET
+        with Ledger(spool.ledger_path) as ledger:
+            listed = pending(ledger, Triage(spool.triage), outbox=spool.outbox)
+        output = render_pending(listed, spool.triage)
+
+        triaged_size = Path(item.spool_path).stat().st_size
+        assert f"triaged {triaged_size} bytes" in output
+        assert f"existing {staged.stat().st_size} bytes" in output
+
     def test_resolving_onto_the_existing_file_is_refused(self, conflicted) -> None:
         """The existing file is a different photo; this would lose the triaged one."""
         config, spool, _nas, existing, copy, item = conflicted
