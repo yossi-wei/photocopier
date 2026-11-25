@@ -21,6 +21,7 @@
 #   LOCK_ALERT_HOURS    email once a day when another job has held the lock this long (24)
 #   STATUS_TIMEOUT      seconds the reporting `status` call may take (300)
 #   STEP_KILL_GRACE     seconds a timed-out step gets to stop before it is killed (30)
+#   SKIP_DARK_WAKE_ON_BATTERY  1 skips a pass that starts in a dark wake on battery power (1)
 #   PHOTOCOPIER_DRY_RUN set to 1 to pass --dry-run to every step and send no email ()
 #
 # Always exits 0 unless it cannot start; problems are reported by email and in the log.
@@ -41,6 +42,7 @@ LOCK_ALERT_HOURS="${LOCK_ALERT_HOURS:-24}"
 NAS_MOUNT_WAIT="${NAS_MOUNT_WAIT:-15}"
 STATUS_TIMEOUT="${STATUS_TIMEOUT:-300}"
 STEP_KILL_GRACE="${STEP_KILL_GRACE:-30}"
+SKIP_DARK_WAKE_ON_BATTERY="${SKIP_DARK_WAKE_ON_BATTERY:-1}"
 DRY="${PHOTOCOPIER_DRY_RUN:-}"
 dry=(); [ "$DRY" = 1 ] && dry=(--dry-run)
 # Marks every step as scheduled in the ledger's runs table, for the unattended streak (D13).
@@ -98,6 +100,31 @@ notify() {
   [ "$rc" -eq 0 ] || log "could not send the email \"$1\", NOTIFY_CMD failed with exit $rc"
   return "$rc"
 }
+
+# -- dark wake on battery: do nothing. ------------------------------------------------------
+# launchd often starts a pass in a dark wake, a brief maintenance wake with the display off.
+# On AC power caffeinate -s holds it. On battery nothing can: the Mac sleeps mid-pass, holds
+# the NAS lock for hours, and wakes with no network, so rclone fails with "no such host" and
+# a failure email goes out for a pass that did nothing wrong. A skipped pass costs nothing
+# and leaves nothing behind: no lock, no half-done step. Every signal here fails open, so a
+# machine that cannot answer (no pmset, an unexpected format) runs the pass as before.
+on_battery() { pmset -g batt 2>/dev/null | head -1 | grep -q 'Battery Power'; }
+# A dark wake is a wake without the Graphics capability.
+dark_wake() {
+  local caps
+  caps="$(pmset -g systemstate 2>/dev/null | sed -n 's/^Current System Capabilities are: *//p')"
+  [ -n "$caps" ] || return 1
+  case " $caps " in *" Graphics "*) return 1 ;; esac
+}
+if [ "$SKIP_DARK_WAKE_ON_BATTERY" = 1 ] && on_battery && dark_wake; then
+  log "skipped: dark wake on battery power, where the Mac can sleep mid-pass. The next pass picks up the work"
+  exit 0
+fi
+
+# The kernel's time of the last wake from sleep. It changes when the Mac sleeps and wakes
+# during a step, which is how a pass finds out it was cut off. Empty when unknown.
+wake_epoch() { sysctl -n kern.waketime 2>/dev/null | sed -n 's/^{ sec = \([0-9][0-9]*\),.*/\1/p'; }
+interrupted=""
 
 # -- lock shared with the other NAS jobs. Skip this pass if another job holds it. --------
 # A pass killed without running its EXIT trap (a crash, a power cut) leaves the lock behind,
@@ -216,7 +243,8 @@ failure_key() {  # name, outcome, output
 step() {  # name, timeout seconds, args...
   local name="$1" secs="$2"; shift 2
   log "== $name"
-  local out rc=0
+  local out rc=0 woke_before woke_after
+  woke_before="$(wake_epoch)"
   # launchd often starts a pass in a dark wake, a brief maintenance wake with the display
   # off. -i alone does not hold one: the Mac slept a second into such a pass, ran it in
   # 20-second slivers for two hours, and two NAS copies failed with EINVAL as the share
@@ -224,7 +252,14 @@ step() {  # name, timeout seconds, args...
   out="$(caffeinate -i -s perl -e "$LIMIT_PL" "$secs" "$STEP_KILL_GRACE" "$BIN" "$@" 2>&1)" || rc=$?
   printf '%s\n' "$out" | tee -a "$run_log" >/dev/null
   step_out+="[$name]"$'\n'"$out"$'\n\n'
-  if [ "$rc" -eq 142 ]; then failures+=("$name timed out after ${secs}s"); failure_key "$name" timeout ""
+  # The Mac slept and woke during this step, as when the lid closes on battery. Whatever
+  # the step reported, such as a DNS failure while Wi-Fi rejoined, says nothing about the
+  # setup. Don't count it, and let the next pass start clean.
+  woke_after="$(wake_epoch)"
+  if [ -n "$woke_before" ] && [ -n "$woke_after" ] && [ "$woke_after" != "$woke_before" ]; then
+    interrupted="$name"
+    log "the Mac slept during $name, so its result is not counted"
+  elif [ "$rc" -eq 142 ]; then failures+=("$name timed out after ${secs}s"); failure_key "$name" timeout ""
   elif [ "$rc" -ne 0 ]; then
     failures+=("$name exited $rc: $(printf '%s' "$out" | tail -2 | tr '\n' ' ')")
     failure_key "$name" "exit $rc" "$out"
@@ -232,8 +267,10 @@ step() {  # name, timeout seconds, args...
 }
 
 step ingest  21600 ingest  ${dry[@]+"${dry[@]}"}
-step process  3600 process ${dry[@]+"${dry[@]}"}
-if [ -z "$nas_note" ]; then
+[ -n "$interrupted" ] || step process  3600 process ${dry[@]+"${dry[@]}"}
+if [ -n "$interrupted" ]; then
+  log "pass stopped early: nothing is lost, and the next pass retries"
+elif [ -z "$nas_note" ]; then
   step flush 21600 flush ${dry[@]+"${dry[@]}"}
 else
   log "flush skipped: $nas_note"
@@ -278,6 +315,7 @@ compose() {
   [ ${#failures[@]} -gt 0 ] && { echo "FAILURES:"; printf ' - %s\n' "${failures[@]}"; echo; }
   [ -n "$warn" ] && { echo "$warn"; echo; }
   [ -n "$status_warn" ] && { echo "$status_warn"; echo; }
+  [ -n "$interrupted" ] && { echo "NOTE: the Mac slept during $interrupted, so this pass stopped early and counted nothing from it. The next pass retries."; echo; }
   [ -n "$nas_note" ] && { echo "$nas_note"; echo; }
   echo "STATUS"; echo "$status_body"; echo
   echo "THIS RUN"; printf '%s' "$step_out"

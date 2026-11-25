@@ -96,6 +96,45 @@ suffix = "phone-2"
             encoding="utf-8",
         )
         (self.shims / "caffeinate").chmod(0o755)
+        # The launcher asks pmset how the Mac is powered and woken, and sysctl when it last
+        # woke. A real Mac answers differently by the minute, so a shim answers from files.
+        self.power_file = tmp_path / "pmset-batt"
+        self.caps_file = tmp_path / "pmset-systemstate"
+        self.wake_file = tmp_path / "waketime"
+        self.wake_ticks = tmp_path / "wake-ticks"
+        (self.shims / "pmset").write_text(
+            "#!/bin/sh\n"
+            f'case "$*" in\n'
+            f'  "-g batt") cat {shlex.quote(str(self.power_file))} ;;\n'
+            f'  "-g systemstate") cat {shlex.quote(str(self.caps_file))} ;;\n'
+            "esac\n",
+            encoding="utf-8",
+        )
+        (self.shims / "sysctl").write_text(
+            "#!/bin/sh\n"
+            f'f={shlex.quote(str(self.wake_file))}\n'
+            'n=$(cat "$f" 2>/dev/null || echo 1000)\n'
+            'echo "{ sec = $n, usec = 0 } Thu Jan  1 00:00:00 2026"\n'
+            # Each answer moves the wake time on, as a sleep and wake between two calls would.
+            f'[ -e {shlex.quote(str(self.wake_ticks))} ] && echo $((n + 1)) > "$f"\n'
+            "exit 0\n",
+            encoding="utf-8",
+        )
+        for shim in ("pmset", "sysctl"):
+            (self.shims / shim).chmod(0o755)
+        self.set_power(battery=False, dark_wake=False)
+
+    def set_power(self, *, battery: bool, dark_wake: bool) -> None:
+        source = "Battery Power" if battery else "AC Power"
+        self.power_file.write_text(
+            f"Now drawing from '{source}'\n -InternalBattery-0 (id=1)\t77%; discharging\n",
+            encoding="utf-8",
+        )
+        caps = "CPU Network" if dark_wake else "CPU Graphics Audio Network"
+        self.caps_file.write_text(
+            f"Current System Capabilities are: {caps} \nCurrent Power State: 4\n",
+            encoding="utf-8",
+        )
 
     def set_notify(self, ok: bool) -> None:
         tail = "" if ok else "exit 1\n"
@@ -573,6 +612,83 @@ class TestLauncherTimeouts:
         log = scheduled.run_log()
         assert 'STATUS_TIMEOUT="abc" is not a whole number of seconds' in log
         assert "status timed out" not in scheduled.bodies()
+
+
+class TestSleepDuringAPass:
+    """The Mac slept through the 23:00 pass of 2026-11-23: it started in a dark wake on
+    battery, froze for eight hours holding the NAS lock, and resumed with no network. rclone
+    failed with "no such host" and a failure email went out for a pass that did nothing wrong.
+    """
+
+    def test_a_dark_wake_on_battery_skips_the_pass(self, scheduled: Pass) -> None:
+        scheduled.set_power(battery=True, dark_wake=True)
+        proc = scheduled.run()
+        assert proc.returncode == 0
+        log = scheduled.run_log()
+        assert "skipped: dark wake on battery power" in log
+        assert "== ingest" not in log
+        assert not scheduled.lock.exists()
+        assert not (scheduled.spool / "ledger.db").exists()
+        assert scheduled.subjects() == []
+        assert not (scheduled.state / "summary-date").exists()
+
+    def test_a_full_wake_on_battery_runs(self, scheduled: Pass) -> None:
+        scheduled.set_power(battery=True, dark_wake=False)
+        scheduled.run()
+        assert "== ingest" in scheduled.run_log()
+
+    def test_a_dark_wake_on_ac_power_runs(self, scheduled: Pass) -> None:
+        """caffeinate -s holds a dark wake on AC power, so there is nothing to skip."""
+        scheduled.set_power(battery=False, dark_wake=True)
+        scheduled.run()
+        assert "== ingest" in scheduled.run_log()
+
+    def test_the_skip_can_be_turned_off(self, scheduled: Pass) -> None:
+        scheduled.set_power(battery=True, dark_wake=True)
+        scheduled.run({"SKIP_DARK_WAKE_ON_BATTERY": "0"})
+        assert "== ingest" in scheduled.run_log()
+
+    @pytest.mark.parametrize("missing", ["power_file", "caps_file"])
+    def test_a_mac_that_cannot_answer_runs_the_pass(self, scheduled: Pass, missing: str) -> None:
+        """Every signal fails open: a pass that cannot tell is run, as before."""
+        scheduled.set_power(battery=True, dark_wake=True)
+        getattr(scheduled, missing).unlink()
+        scheduled.run()
+        assert "== ingest" in scheduled.run_log()
+
+    def test_a_step_cut_off_by_sleep_is_not_a_failure(self, scheduled: Pass) -> None:
+        scheduled.wake_ticks.touch()
+        scheduled.set_summary_date(date.today())
+        proc = scheduled.run(FAIL_VIDEO_COPY)
+        assert proc.returncode == 0
+        log = scheduled.run_log()
+        assert "the Mac slept during ingest, so its result is not counted" in log
+        assert "pass stopped early" in log
+        assert "== process" not in log
+        assert "== flush" not in log
+        assert "done with" not in log
+        assert scheduled.subjects() == []
+        assert not (scheduled.state / "last-failure").exists()
+        assert not scheduled.lock.exists()
+
+    def test_the_next_pass_after_a_sleep_delivers_everything(self, scheduled: Pass) -> None:
+        scheduled.wake_ticks.touch()
+        scheduled.run()
+        scheduled.wake_ticks.unlink()
+        scheduled.run()
+        assert "== process" in scheduled.run_log()
+        assert "done" in scheduled.run_log()
+
+    def test_the_daily_summary_says_the_pass_was_cut_short(self, scheduled: Pass) -> None:
+        scheduled.wake_ticks.touch()
+        body = scheduled.next_day_summary()
+        assert "the Mac slept during ingest" in body, body
+        assert "daily summary" in "\n".join(scheduled.subjects())
+
+    def test_a_failure_with_no_sleep_is_still_a_failure(self, scheduled: Pass) -> None:
+        scheduled.set_summary_date(date.today())
+        scheduled.run(FAIL_VIDEO_COPY)
+        assert len(failure_subjects(scheduled)) == 1, scheduled.bodies()
 
 
 def failure_subjects(p: Pass) -> list[str]:
